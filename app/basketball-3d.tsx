@@ -134,28 +134,11 @@ export default function Basketball3D() {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color('#84bee3');
     scene.fog = new THREE.Fog('#b9d7e8', 38, 82);
-    const camera = new THREE.PerspectiveCamera(76, 1, 0.1, 120);
+    // Keep the near plane close enough for the animated player's real hands and
+    // forearms to remain visible from the eye camera. The previous camera-mounted
+    // capsule arms were only a placeholder and could never match the mocap rig.
+    const camera = new THREE.PerspectiveCamera(76, 1, 0.035, 120);
     scene.add(camera);
-
-    const viewSkin = new THREE.MeshStandardMaterial({ color: '#b97852', roughness: 0.72, depthTest: false, depthWrite: false });
-    const viewJersey = new THREE.MeshStandardMaterial({ color: jerseyRef.current, roughness: 0.5, depthTest: false, depthWrite: false });
-    const firstPersonArms = new THREE.Group();
-    firstPersonArms.name = 'firstPersonArms';
-    const viewArms = ([-1, 1] as const).map((side) => {
-      const arm = new THREE.Group();
-      const sleeve = new THREE.Mesh(new THREE.CapsuleGeometry(0.092, 0.2, 3, 8), viewJersey);
-      sleeve.position.y = -0.12;
-      const forearm = new THREE.Mesh(new THREE.CapsuleGeometry(0.074, 0.29, 3, 8), viewSkin);
-      forearm.position.y = -0.39;
-      const hand = new THREE.Mesh(new THREE.SphereGeometry(0.095, 10, 8), viewSkin);
-      hand.position.y = -0.63; hand.scale.set(0.9, 1.12, 0.82);
-      [sleeve, forearm, hand].forEach((mesh) => { mesh.renderOrder = 20; arm.add(mesh); });
-      arm.position.set(side * 0.34, -0.24, -0.62);
-      firstPersonArms.add(arm);
-      return arm;
-    });
-    firstPersonArms.visible = false;
-    camera.add(firstPersonArms);
 
     scene.add(new THREE.HemisphereLight('#e9f8ff', '#4f3427', 2.7));
     const sun = new THREE.DirectionalLight('#fff4dc', 4.4);
@@ -368,6 +351,10 @@ export default function Basketball3D() {
     athletes[0].group.visible = true;
 
     let rigCancelled = false;
+    let viewModel: THREE.Group | undefined;
+    let viewMixer: THREE.AnimationMixer | undefined;
+    let viewActions: Map<string, THREE.AnimationAction> | undefined;
+    let viewCurrentClip = 'Mixamo_Run';
     const rigLoader = new FBXLoader();
     void Promise.all([
       rigLoader.loadAsync('/assets/basketball/140_06.fbx'),
@@ -387,7 +374,12 @@ export default function Basketball3D() {
       rigLoader.loadAsync('/assets/basketball/102_32.fbx'),
       rigLoader.loadAsync('/assets/basketball/102_10.fbx'),
       rigLoader.loadAsync('/assets/basketball/124_06.fbx'),
-    ]).then(([character, walkMotion, runMotion, dribbleMotion, shotMotion, jumpMotion, defenseMotion, crossoverMotion, betweenLegsMotion, backwardMotion, leftDribbleMotion, rightDribbleMotion, burstMotion, rightDriveMotion, leftDriveMotion, sprintMotion, dunkMotion]) => {
+      rigLoader.loadAsync('/assets/basketball/mixamo/dribble.fbx'),
+      rigLoader.loadAsync('/assets/basketball/mixamo/steal.fbx'),
+      rigLoader.loadAsync('/assets/basketball/mixamo/block.fbx'),
+      rigLoader.loadAsync('/assets/basketball/mixamo/shot.fbx'),
+      rigLoader.loadAsync('/assets/basketball/mixamo/run.fbx'),
+    ]).then(([character, walkMotion, runMotion, dribbleMotion, shotMotion, jumpMotion, defenseMotion, crossoverMotion, betweenLegsMotion, backwardMotion, leftDribbleMotion, rightDribbleMotion, burstMotion, rightDriveMotion, leftDriveMotion, sprintMotion, dunkMotion, mixamoCharacter, mixamoSteal, mixamoBlock, mixamoShot, mixamoRun]) => {
       if (rigCancelled) return;
       const sourceClip = (source: THREE.Group, name: string) => {
         const sourceAnimation = source.animations[0];
@@ -435,6 +427,28 @@ export default function Basketball3D() {
         });
         clip.optimize();
       });
+      const makeViewClip = (source: THREE.Group, name: string) => {
+        const clip = source.animations[0].clone();
+        clip.name = name;
+        clip.tracks.forEach((track) => {
+          if (!/Hips\.position$/i.test(track.name) || track.values.length < 3) return;
+          const values = track.values;
+          const rootX = values[0]; const rootZ = values[2];
+          for (let frame = 0; frame < values.length; frame += 3) {
+            values[frame] = rootX;
+            values[frame + 2] = rootZ;
+          }
+        });
+        clip.optimize();
+        return clip;
+      };
+      const viewClips = [
+        makeViewClip(mixamoCharacter, 'Mixamo_Dribble'),
+        makeViewClip(mixamoSteal, 'Mixamo_Steal'),
+        makeViewClip(mixamoBlock, 'Mixamo_Block'),
+        makeViewClip(mixamoShot, 'Mixamo_Shot'),
+        makeViewClip(mixamoRun, 'Mixamo_Run'),
+      ];
 
       athletes.forEach((player, index) => {
         const model = cloneSkeleton(character) as THREE.Group;
@@ -505,6 +519,74 @@ export default function Basketball3D() {
         player.rig = model;
         player.visual = visual;
       });
+
+      // The first-person body uses a single Mixamo skeleton for every imported
+      // action. Filtering by arm-bone weights keeps smooth shoulders, elbows,
+      // wrists and finger geometry while preventing the torso from crossing the
+      // near plane.
+      viewModel = cloneSkeleton(mixamoCharacter) as THREE.Group;
+      const viewBounds = new THREE.Box3().setFromObject(viewModel);
+      const viewCenter = viewBounds.getCenter(new THREE.Vector3());
+      const viewScale = 2.02 / Math.max(0.01, viewBounds.max.y - viewBounds.min.y);
+      viewModel.scale.setScalar(viewScale);
+      viewModel.position.set(-viewCenter.x * viewScale, -viewBounds.min.y * viewScale - 1.88, -0.7 - viewCenter.z * viewScale);
+      viewModel.rotation.y = Math.PI;
+      viewModel.name = 'firstPersonRig';
+      const viewSkinnedMeshes: THREE.SkinnedMesh[] = [];
+      viewModel.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) return;
+        if (object instanceof THREE.SkinnedMesh) viewSkinnedMeshes.push(object);
+        if (object.name !== 'Beta_Surface' || !(object instanceof THREE.SkinnedMesh)) {
+          object.visible = false;
+          return;
+        }
+        const sourceGeometry = object.geometry;
+        const sourceIndex = sourceGeometry.index;
+        const skinIndex = sourceGeometry.attributes.skinIndex;
+        const skinWeight = sourceGeometry.attributes.skinWeight;
+        if (skinIndex && skinWeight && object instanceof THREE.SkinnedMesh) {
+          const armBones = new Set(object.skeleton.bones
+            .map((bone, boneIndex) => (/Shoulder|Arm|ForeArm|Hand/i.test(bone.name) ? boneIndex : -1))
+            .filter((boneIndex) => boneIndex >= 0));
+          const armInfluence = (vertex: number) => {
+            const indices = [skinIndex.getX(vertex), skinIndex.getY(vertex), skinIndex.getZ(vertex), skinIndex.getW(vertex)];
+            const weights = [skinWeight.getX(vertex), skinWeight.getY(vertex), skinWeight.getZ(vertex), skinWeight.getW(vertex)];
+            return indices.reduce((total, boneIndex, influenceIndex) => total + (armBones.has(boneIndex) ? weights[influenceIndex] : 0), 0);
+          };
+          const armIndices: number[] = [];
+          const groups = sourceGeometry.groups.length ? sourceGeometry.groups : [{ start: 0, count: sourceGeometry.attributes.position.count, materialIndex: 0 }];
+          groups.forEach((group: { start: number; count: number; materialIndex: number }) => {
+            for (let offset = group.start; offset < group.start + group.count; offset += 3) {
+              const a = sourceIndex ? sourceIndex.getX(offset) : offset;
+              const b = sourceIndex ? sourceIndex.getX(offset + 1) : offset + 1;
+              const c = sourceIndex ? sourceIndex.getX(offset + 2) : offset + 2;
+              const minimumArmInfluence = Math.min(armInfluence(a), armInfluence(b), armInfluence(c));
+              if (minimumArmInfluence > 0.015) armIndices.push(a, b, c);
+            }
+          });
+          const viewGeometry = sourceGeometry.clone();
+          viewGeometry.setIndex(armIndices);
+          viewGeometry.clearGroups();
+          object.geometry = viewGeometry;
+        }
+        object.frustumCulled = false;
+        object.renderOrder = 12;
+        const materials = (Array.isArray(object.material) ? object.material : [object.material]).map((entry) => entry.clone());
+        object.material = materials.length === 1 ? materials[0] : materials;
+        materials.forEach((entry) => {
+          entry.depthTest = false;
+          entry.depthWrite = false;
+          if ('color' in entry && entry.color instanceof THREE.Color) entry.color.set('#c3835d');
+        });
+      });
+      const viewSkeleton = viewSkinnedMeshes[0]?.skeleton;
+      if (viewSkeleton) viewSkinnedMeshes.slice(1).forEach((mesh) => mesh.bind(viewSkeleton, mesh.bindMatrix));
+      camera.add(viewModel);
+      viewMixer = new THREE.AnimationMixer(viewModel);
+      viewActions = new Map<string, THREE.AnimationAction>();
+      viewClips.forEach((clip) => viewActions?.set(clip.name, viewMixer!.clipAction(clip)));
+      viewActions.get('Mixamo_Run')?.reset().setEffectiveTimeScale(0.68).play();
+      athletes[0].group.visible = false;
     }).catch((error) => console.error('Character rig failed to load', error));
 
     const ballGroup = new THREE.Group();
@@ -1301,6 +1383,35 @@ export default function Basketball3D() {
             }
           }
           player.mixer.update(dt);
+          if (index === 0 && viewMixer && viewActions) {
+            let viewClipName = ball.owner === 0 ? 'Mixamo_Dribble' : 'Mixamo_Run';
+            if (active === 'shoot' || active === 'pass') viewClipName = 'Mixamo_Shot';
+            if (active === 'jump' || active === 'dunk') viewClipName = 'Mixamo_Block';
+            if (active === 'steal') viewClipName = 'Mixamo_Steal';
+            const viewPlaybackRate = viewClipName === 'Mixamo_Dribble' ? (moving ? 1.18 : 0.92)
+              : viewClipName === 'Mixamo_Run' ? (moving ? 1.12 : 0.58)
+              : viewClipName === 'Mixamo_Shot' ? 1.42
+              : viewClipName === 'Mixamo_Block' ? 1.32
+              : 1.52;
+            if (viewCurrentClip !== viewClipName) {
+              const previousView = viewActions.get(viewCurrentClip);
+              const nextView = viewActions.get(viewClipName);
+              if (nextView) {
+                const transition = viewClipName === 'Mixamo_Steal' || viewClipName === 'Mixamo_Block' ? 0.045 : 0.075;
+                previousView?.fadeOut(transition);
+                nextView.reset()
+                  .setEffectiveWeight(1)
+                  .setEffectiveTimeScale(viewPlaybackRate);
+                if (viewClipName === 'Mixamo_Dribble' || viewClipName === 'Mixamo_Run') nextView.setLoop(THREE.LoopRepeat, Infinity);
+                else { nextView.setLoop(THREE.LoopOnce, 1); nextView.clampWhenFinished = true; }
+                nextView.fadeIn(transition).play();
+                viewCurrentClip = viewClipName;
+              }
+            } else {
+              viewActions.get(viewClipName)?.setEffectiveTimeScale(viewPlaybackRate);
+            }
+            viewMixer.update(dt);
+          }
           if (player.visual) {
             let targetLeanX = 0; let targetLeanZ = 0;
             if (index === 0 && specialShotActive) {
@@ -1426,56 +1537,23 @@ export default function Basketball3D() {
 
     const updateCamera = () => {
       const me = athletes[0];
+      if (viewModel) viewModel.visible = phaseRef.current === 'playing';
       const forward = new THREE.Vector3(Math.sin(cameraYaw), 0, -Math.cos(cameraYaw));
       const moving = me.velocity.lengthSq() > 0.16 && me.jump < 0.06 && !dunking;
       const armClock = performance.now() / 1000;
-      const bob = moving ? Math.sin(armClock * 12) * 0.025 : 0;
-      const eye = me.position.clone().addScaledVector(forward, 0.3);
-      eye.y = 1.7 + me.jump + bob;
+      const stride = moving ? Math.sin(armClock * 11.5) : 0;
+      const bob = stride * 0.018;
+      const lateralSway = moving ? Math.cos(armClock * 5.75) * 0.014 : 0;
+      const right = new THREE.Vector3(-forward.z, 0, forward.x);
+      // Sit the camera just in front of the face and slightly below eye level.
+      // This keeps the mocap-driven shoulders, arms and upper legs in frame while
+      // avoiding the back of the character's head clipping into the view.
+      const eye = me.position.clone().addScaledVector(forward, 0.21).addScaledVector(right, lateralSway);
+      eye.y = 1.64 + me.jump + bob;
       camera.position.copy(eye);
       const lookDirection = forward.multiplyScalar(Math.cos(cameraPitch));
       lookDirection.y = Math.sin(cameraPitch);
       camera.lookAt(eye.clone().addScaledVector(lookDirection.normalize(), 14));
-
-      firstPersonArms.visible = phaseRef.current === 'playing';
-      viewArms.forEach((arm, armIndex) => {
-        const side = armIndex === 0 ? -1 : 1;
-        const targetPosition = new THREE.Vector3(side * 0.34, -0.24 + bob * 0.7, -0.62);
-        let targetRotationX = moving ? Math.sin(armClock * 10 + armIndex * Math.PI) * 0.16 : 0;
-        let targetRotationZ = side * 0.08;
-        const shooting = charging || shotPending || (me.actionKind === 'shoot' && me.action > 0);
-        const blocking = me.actionKind === 'jump' && me.action > 0;
-        const stealing = me.actionKind === 'steal' && me.action > 0;
-        const passing = me.actionKind === 'pass' && me.action > 0;
-        const dunkPose = me.actionKind === 'dunk' && me.action > 0;
-        if (shooting) {
-          targetPosition.set(side * 0.13, 0.02, -0.58);
-          targetRotationX = 1.35; targetRotationZ = side * -0.08;
-        } else if (blocking) {
-          targetPosition.set(side * 0.2, 0.32, -0.55);
-          targetRotationX = 0.08; targetRotationZ = Math.PI + side * 0.08;
-        } else if (stealing) {
-          const lead = side > 0;
-          targetPosition.set(side * (lead ? 0.12 : 0.3), lead ? -0.02 : -0.25, lead ? -0.72 : -0.58);
-          targetRotationX = lead ? 1.48 : -0.18; targetRotationZ = side * 0.06;
-        } else if (passing) {
-          targetPosition.set(side * 0.14, -0.02, -0.68);
-          targetRotationX = 1.42; targetRotationZ = side * -0.05;
-        } else if (dunkPose) {
-          const lead = side > 0;
-          targetPosition.set(side * 0.18, lead ? 0.32 : 0.03, -0.57);
-          targetRotationX = lead ? 0.12 : 1.1; targetRotationZ = lead ? Math.PI + 0.08 : side * -0.06;
-        } else if (ball.owner === 0) {
-          const lead = (dribbleHand === 'right' && side > 0) || (dribbleHand === 'left' && side < 0);
-          if (lead) {
-            targetPosition.y -= 0.08 + Math.max(0, Math.sin(armClock * 12)) * 0.12;
-            targetRotationX = 0.32 + Math.sin(armClock * 12) * 0.24;
-          }
-        }
-        arm.position.lerp(targetPosition, 0.24);
-        arm.rotation.x += (targetRotationX - arm.rotation.x) * 0.24;
-        arm.rotation.z += (targetRotationZ - arm.rotation.z) * 0.24;
-      });
 
       if (blockCameraKick > 0) {
         const strength = blockCameraKick / 0.24;
@@ -1502,7 +1580,6 @@ export default function Basketball3D() {
           if (jerseyMesh) (jerseyMesh.material as THREE.MeshStandardMaterial).color.set(color);
           if (shortsMesh) (shortsMesh.material as THREE.MeshStandardMaterial).color.set(color).multiplyScalar(0.55);
         });
-        viewJersey.color.set(color); viewJersey.needsUpdate = true;
       },
     };
 
