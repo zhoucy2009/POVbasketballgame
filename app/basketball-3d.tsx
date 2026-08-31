@@ -142,31 +142,6 @@ export default function Basketball3D() {
     const camera = new THREE.PerspectiveCamera(72, 1, 0.035, 120);
     scene.add(camera);
 
-    // Keep the stable pre-Mixamo shooting pose for first-person releases. The
-    // imported body is hidden only during shooting, so this small overlay never
-    // competes with the mocap rig during running, dribbling, steals or blocks.
-    const shotSkin = new THREE.MeshStandardMaterial({ color: '#b97852', roughness: 0.72, depthTest: false, depthWrite: false });
-    const shotJersey = new THREE.MeshStandardMaterial({ color: jerseyRef.current, roughness: 0.5, depthTest: false, depthWrite: false });
-    const legacyShotArms = new THREE.Group();
-    const legacyShotLimbs = ([-1, 1] as const).map((side) => {
-      const arm = new THREE.Group();
-      const sleeve = new THREE.Mesh(new THREE.CapsuleGeometry(0.092, 0.2, 3, 8), shotJersey);
-      sleeve.position.y = -0.12;
-      const forearm = new THREE.Mesh(new THREE.CapsuleGeometry(0.074, 0.29, 3, 8), shotSkin);
-      forearm.position.y = -0.39;
-      const hand = new THREE.Mesh(new THREE.SphereGeometry(0.095, 10, 8), shotSkin);
-      hand.position.y = -0.63;
-      hand.scale.set(0.9, 1.12, 0.82);
-      [sleeve, forearm, hand].forEach((mesh) => { mesh.renderOrder = 20; arm.add(mesh); });
-      arm.position.set(side * 0.13, 0.02, -0.58);
-      arm.rotation.x = 1.35;
-      arm.rotation.z = side * -0.08;
-      legacyShotArms.add(arm);
-      return arm;
-    });
-    legacyShotArms.visible = false;
-    camera.add(legacyShotArms);
-
     scene.add(new THREE.HemisphereLight('#e9f8ff', '#4f3427', 2.7));
     const sun = new THREE.DirectionalLight('#fff4dc', 4.4);
     sun.position.set(-10, 24, 7);
@@ -548,10 +523,10 @@ export default function Basketball3D() {
         player.visual = visual;
       });
 
-      // Keep the Mixamo skin intact. Cutting a skinned mesh by per-vertex bone
-      // weights created the broken floating polygons visible in first person.
-      // Placing the intact body just behind the eye leaves only naturally
-      // animated arms in front of the near plane.
+      // Keep the Mixamo geometry intact. A shader mask reveals the animated arms
+      // and lower legs without cutting triangles out of the skinned mesh. Head,
+      // torso and shoulder-joint weights never render, so they cannot cross the
+      // camera or create the broken polygons caused by indexed-geometry slicing.
       viewModel = cloneSkeleton(mixamoCharacter) as THREE.Group;
       const viewBounds = new THREE.Box3().setFromObject(viewModel);
       const viewCenter = viewBounds.getCenter(new THREE.Vector3());
@@ -559,7 +534,7 @@ export default function Basketball3D() {
       // than the world athlete or nearby hands make the player feel oversized.
       const viewScale = 1.94 / Math.max(0.01, viewBounds.max.y - viewBounds.min.y);
       viewModel.scale.setScalar(viewScale);
-      viewModel.position.set(-viewCenter.x * viewScale, -viewBounds.min.y * viewScale - 1.65, 0.24 - viewCenter.z * viewScale);
+      viewModel.position.set(-viewCenter.x * viewScale, -viewBounds.min.y * viewScale - 1.82, -0.58 - viewCenter.z * viewScale);
       viewModel.rotation.y = Math.PI;
       viewModel.name = 'firstPersonRig';
       const viewSkinnedMeshes: THREE.SkinnedMesh[] = [];
@@ -570,6 +545,22 @@ export default function Basketball3D() {
           object.visible = false;
           return;
         }
+        const sourceGeometry = object.geometry;
+        const skinIndex = sourceGeometry.attributes.skinIndex;
+        const skinWeight = sourceGeometry.attributes.skinWeight;
+        if (object instanceof THREE.SkinnedMesh && skinIndex && skinWeight) {
+          const visibleBones = new Set(object.skeleton.bones
+            .map((bone, boneIndex) => (/Arm|ForeArm|Hand|UpLeg|Leg|Foot|Toe/i.test(bone.name) && !/Shoulder/i.test(bone.name) ? boneIndex : -1))
+            .filter((boneIndex) => boneIndex >= 0));
+          const mask = new Float32Array(sourceGeometry.attributes.position.count);
+          for (let vertex = 0; vertex < mask.length; vertex += 1) {
+            const indices = [skinIndex.getX(vertex), skinIndex.getY(vertex), skinIndex.getZ(vertex), skinIndex.getW(vertex)];
+            const weights = [skinWeight.getX(vertex), skinWeight.getY(vertex), skinWeight.getZ(vertex), skinWeight.getW(vertex)];
+            mask[vertex] = indices.reduce((total, boneIndex, influenceIndex) => total + (visibleBones.has(boneIndex) ? weights[influenceIndex] : 0), 0);
+          }
+          object.geometry = sourceGeometry.clone();
+          object.geometry.setAttribute('viewPartMask', new THREE.BufferAttribute(mask, 1));
+        }
         object.frustumCulled = false;
         object.renderOrder = 12;
         const materials = (Array.isArray(object.material) ? object.material : [object.material]).map((entry) => entry.clone());
@@ -578,6 +569,15 @@ export default function Basketball3D() {
           entry.depthTest = true;
           entry.depthWrite = true;
           if ('color' in entry && entry.color instanceof THREE.Color) entry.color.set('#c3835d');
+          entry.onBeforeCompile = (shader: THREE.WebGLProgramParametersWithUniforms) => {
+            shader.vertexShader = shader.vertexShader
+              .replace('#include <common>', '#include <common>\nattribute float viewPartMask;\nvarying float vViewPartMask;')
+              .replace('#include <begin_vertex>', '#include <begin_vertex>\nvViewPartMask = viewPartMask;');
+            shader.fragmentShader = shader.fragmentShader
+              .replace('#include <common>', '#include <common>\nvarying float vViewPartMask;')
+              .replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\nif (vViewPartMask < 0.045) discard;');
+          };
+          entry.customProgramCacheKey = () => 'first-person-limbs-v2';
         });
       });
       const viewSkeleton = viewSkinnedMeshes[0]?.skeleton;
@@ -1538,15 +1538,7 @@ export default function Basketball3D() {
 
     const updateCamera = () => {
       const me = athletes[0];
-      const legacyShotVisible = phaseRef.current === 'playing' && (charging || shotPending || (me.actionKind === 'shoot' && me.action > 0) || (me.actionKind === 'pass' && me.action > 0));
-      legacyShotArms.visible = legacyShotVisible;
-      if (viewModel) viewModel.visible = phaseRef.current === 'playing' && !legacyShotVisible;
-      legacyShotLimbs.forEach((arm, armIndex) => {
-        const side = armIndex === 0 ? -1 : 1;
-        arm.position.set(side * 0.13, 0.02, -0.58);
-        arm.rotation.x = 1.35;
-        arm.rotation.z = side * -0.08;
-      });
+      if (viewModel) viewModel.visible = phaseRef.current === 'playing';
       const forward = new THREE.Vector3(Math.sin(cameraYaw), 0, -Math.cos(cameraYaw));
       const moving = me.velocity.lengthSq() > 0.16 && me.jump < 0.06 && !dunking;
       const armClock = performance.now() / 1000;
@@ -1589,8 +1581,6 @@ export default function Basketball3D() {
           if (jerseyMesh) (jerseyMesh.material as THREE.MeshStandardMaterial).color.set(color);
           if (shortsMesh) (shortsMesh.material as THREE.MeshStandardMaterial).color.set(color).multiplyScalar(0.55);
         });
-        shotJersey.color.set(color);
-        shotJersey.needsUpdate = true;
       },
     };
 
