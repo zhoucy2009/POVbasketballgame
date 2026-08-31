@@ -70,7 +70,6 @@ const BLOCK_HORIZONTAL_RADIUS = 0.82;
 const DUNK_START_RADIUS = 5.2;
 const DUNK_CONTEST_RADIUS = 1.05;
 const PUTBACK_PLAYER_RADIUS = 2.65;
-const PUTBACK_BALL_RADIUS = 1.3;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -686,13 +685,9 @@ export default function Basketball3D() {
       const distance = new THREE.Vector2(me.position.x - target.x, me.position.z - target.z).length();
       const isPutback = ball.owner !== 0;
       if (!isPutback && distance > DUNK_START_RADIUS) { showMessage('靠近篮筐才能扣篮', 850); return; }
-      if (isPutback) {
-        const ballToRim = ball.position.distanceTo(target);
-        const validLooseBall = (ball.mode === 'loose' || ball.mode === 'shot') && ball.position.y > 1.6;
-        if (!validLooseBall || distance > PUTBACK_PLAYER_RADIUS || ballToRim > PUTBACK_BALL_RADIUS) {
-          showMessage('补扣距离太远', 780);
-          return;
-        }
+      if (isPutback && distance > PUTBACK_PLAYER_RADIUS) {
+        showMessage('靠近篮筐才能补扣', 780);
+        return;
       }
       dunkCharging = true; dunkPower = ball.owner === 0 ? 0 : 0.68; dribbling = false; dribbleGrace = 0; dashTime = 0;
       me.action = 0.5; me.actionKind = 'shoot';
@@ -895,6 +890,26 @@ export default function Basketball3D() {
       showMessage(points === 3 ? '三分命中！' : '进球！', 1050);
     };
 
+    const keepBallOnCourt = () => {
+      if (ball.owner !== null || ball.scored) return;
+      const maxX = COURT_HALF_X - BALL_RADIUS;
+      const maxZ = COURT_HALF_Z - BALL_RADIUS;
+      let hitBoundary = false;
+      if (ball.position.x < -maxX || ball.position.x > maxX) {
+        ball.position.x = clamp(ball.position.x, -maxX, maxX);
+        ball.velocity.x *= -0.68;
+        hitBoundary = true;
+      }
+      if (ball.position.z < -maxZ || ball.position.z > maxZ) {
+        ball.position.z = clamp(ball.position.z, -maxZ, maxZ);
+        ball.velocity.z *= -0.68;
+        hitBoundary = true;
+      }
+      if (hitBoundary && (ball.mode === 'shot' || ball.mode === 'pass')) {
+        ball.mode = 'loose'; ball.passTarget = null; ball.shotMake = false; ball.shotAge = 0;
+      }
+    };
+
     const updateBall = (dt: number, now: number) => {
       const possessionDribble = ball.owner === 0 && !charging && !shotPending && !dunkCharging && !dunking;
       if (dunking && !dunkHasBall && !dunkResolved && ball.owner === null && !ball.scored) {
@@ -1008,6 +1023,13 @@ export default function Basketball3D() {
           ball.position.copy(target);
           ball.group.rotation.x += dt * 18;
           ball.group.rotation.z += dt * (dribbleMove === 'forward' ? 4 : 11);
+        } else if (ball.owner !== 0 && player.velocity.lengthSq() > 0.35 && player.jump < 0.12) {
+          const palm = getHandPosition(player, 'right');
+          const ground = player.group.localToWorld(new THREE.Vector3(0.34, 0, 0.24));
+          ground.y = BALL_RADIUS;
+          const bounce = Math.pow(Math.abs(Math.cos(now * 6.2 + ball.owner * 1.7)), 0.7);
+          ball.position.copy(ground).lerp(palm, bounce);
+          ball.group.rotation.x += dt * 17;
         } else {
           const held = handPosition.clone(); held.y = Math.max(0.82 + player.jump, held.y - 0.06);
           ball.position.lerp(held, 0.72);
@@ -1016,6 +1038,7 @@ export default function Basketball3D() {
       } else if (ball.mode === 'pass') {
         ball.position.addScaledVector(ball.velocity, dt);
         ball.group.rotation.x += dt * 14;
+        keepBallOnCourt();
         if (ball.passTarget !== null) {
           const target = athletes[ball.passTarget];
           if (ball.position.distanceTo(target.position.clone().add(new THREE.Vector3(0, 1.1, 0))) < 1.05) {
@@ -1034,6 +1057,7 @@ export default function Basketball3D() {
         ball.position.addScaledVector(ball.velocity, dt);
         ball.group.rotation.x += dt * 15;
         ball.group.rotation.z += dt * 8;
+        keepBallOnCourt();
 
         const user = athletes[0];
         if (ball.mode === 'shot' && athletes[ball.lastOwner].team === 1 && user.jump > 0.38 && user.position.distanceTo(new THREE.Vector3(ball.position.x, 0, ball.position.z)) < BLOCK_HORIZONTAL_RADIUS && ball.position.y < user.jump + 2.38) {
@@ -1182,16 +1206,17 @@ export default function Basketball3D() {
         const phase = now * ((dribbling || dribbleGrace > 0) && index === 0 ? 10.5 : 8.5) + index * 0.7;
         const swing = moving ? Math.sin(phase) : 0;
         const blend = 1 - Math.exp(-dt * 16);
-        const possessionDribble = index === 0 && ball.owner === 0 && !charging && !shotPending && !dunkCharging && !dunking;
+        const possessionDribble = ball.owner === index && !(index === 0 && (charging || shotPending || dunkCharging || dunking));
         const active: MotionName = index === 0 && (charging || dunkCharging) ? 'shoot' : player.action > 0 ? player.actionKind : (possessionDribble ? 'dribble' : player.jump > 0.12 ? 'jump' : 'idle');
         const spinProgress = index === 0 && spinDirection !== 0 && dashDuration > 0 ? 1 - clamp(dashTime / dashDuration, 0, 1) : 0;
         const spinEase = spinProgress * spinProgress * (3 - 2 * spinProgress);
         const visualSpin = spinDirection * Math.PI * 2 * spinEase;
 
         if (player.mixer && player.actions) {
-          let clipName = moving ? (player.velocity.length() > 5.8 ? 'Run_Loop' : 'Walk_Loop') : 'Idle_Loop';
+          let clipName = moving ? 'Run_Loop' : 'Idle_Loop';
           if (active === 'dribble') {
-            clipName = dribbleMove === 'backward' ? 'Basketball_Dribble_Backward'
+            clipName = moving && (index !== 0 || dribbleMove === 'forward') ? 'Basketball_Drive_Straight'
+              : dribbleMove === 'backward' ? 'Basketball_Dribble_Backward'
               : dribbleMove === 'left' ? 'Basketball_Dribble_Left'
               : dribbleMove === 'right' ? 'Basketball_Dribble_Right'
               : dribbleMove === 'between' ? 'Basketball_BetweenLegs'
@@ -1224,14 +1249,14 @@ export default function Basketball3D() {
                 : clipName === 'Basketball_BetweenLegs' ? 1.68
                 : clipName === 'Basketball_Dribble_Backward' ? 1.3
                 : clipName === 'Basketball_Dribble_Left' || clipName === 'Basketball_Dribble_Right' ? 1.36
-                : clipName.startsWith('Basketball_Drive_') ? 2.35
+                : clipName.startsWith('Basketball_Drive_') ? 1.75
                 : clipName === 'Basketball_Sprint' ? 1.8
                 : clipName === 'Basketball_Dribble_Loop' ? 1.12
                 : clipName === 'Basketball_Steal' ? 1.35
                 : clipName === 'Basketball_Pass' ? 1.25
                 : 1;
               next.reset().setEffectiveWeight(1).setEffectiveTimeScale(playbackRate);
-              if (clipName.endsWith('_Loop') || clipName.startsWith('Basketball_Dribble_') || clipName === 'Basketball_Crossover' || clipName === 'Basketball_BetweenLegs') next.setLoop(THREE.LoopRepeat, Infinity);
+              if (clipName.endsWith('_Loop') || clipName.startsWith('Basketball_Dribble_') || clipName.startsWith('Basketball_Drive_') || clipName === 'Basketball_Crossover' || clipName === 'Basketball_BetweenLegs') next.setLoop(THREE.LoopRepeat, Infinity);
               else { next.setLoop(THREE.LoopOnce, 1); next.clampWhenFinished = true; }
               next.fadeIn(transition).play();
               player.currentClip = clipName;
