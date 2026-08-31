@@ -1826,7 +1826,6 @@ export default function Basketball3D() {
       {message && <div className="event3d">{message}</div>}
       {blockImpact && <div className="blockImpact3d" aria-live="assertive"><strong>BLOCK!</strong><span>封盖成功</span></div>}
       {phase === 'playing' && <>
-        <div className="crosshair3d" aria-hidden="true"><i/><i/></div>
         <div className="room3d"><span>Room code: <b>1844</b></span><span>Region: asia</span><span>Type: local</span><em>⌁ Ping: 18</em></div>
         <div className="chat3d"><button className="exit3d" onClick={()=>changePhase('paused')}>Exit <kbd>P</kbd></button><div><button onClick={()=>setMessage('PASS!')}>PASS <kbd>1</kbd></button><button onClick={()=>setMessage('NICE!')}>NICE <kbd>2</kbd></button><button onClick={()=>setMessage('SORRY!')}>SORRY <kbd>3</kbd></button><span>CHAT</span></div></div>
         <div className="guide3d"><span>Jump / Block <kbd>LMB</kbd></span><span>Steal <kbd>Shift</kbd></span><span>Pass / Call <kbd>F</kbd></span><span>Dash <kbd>Space</kbd></span><span>Dribble + Move <kbd>RMB</kbd></span><span>Burst Combo <kbd>RMB + Space</kbd></span><span>Side-step Shot <kbd>A/D + Space + LMB</kbd></span><span>Fadeaway <kbd>S + Space + LMB</kbd></span><span>Shoot <kbd>LMB</kbd></span><span>Dunk / Putback <kbd>Tab</kbd></span></div>
