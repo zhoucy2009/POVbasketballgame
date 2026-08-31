@@ -8,7 +8,7 @@ import OnlineLobby from '@/components/online-lobby';
 import type { OnlineMatchSession } from '@/lib/multiplayer-types';
 
 type Phase = 'menu' | 'rooms' | 'playing' | 'paused' | 'over';
-type GameMode = '3v3' | '1v1';
+type GameMode = '3v3' | '1v1' | 'practice';
 type Team = 0 | 1;
 type BallMode = 'held' | 'shot' | 'pass' | 'loose' | 'dead';
 
@@ -172,7 +172,7 @@ export default function Basketball3D() {
   const startPractice = useCallback(() => {
     onlineSessionRef.current = null;
     setOnlineMatch(null);
-    startGame('1v1');
+    startGame('practice');
   }, [startGame]);
 
   const leaveOnlineMatch = useCallback((destination: Phase = 'menu') => {
@@ -418,7 +418,9 @@ export default function Basketball3D() {
       number: [16, 11, 23, 3, 8, 14][index], jump: 0, jumpV: 0, action: 0, facing: index < 3 ? Math.PI / 2 : -Math.PI / 2,
       actionKind: 'idle', moveKind: 'forward', moveUntil: 0, dribblePhase: index * 0.17, dribbleHand: index % 2 ? 'left' : 'right',
     }));
-    const isActiveIndex = (index: number) => modeRef.current === '3v3' || index === 0 || index === 3;
+    const isActiveIndex = (index: number) => modeRef.current === '3v3'
+      || modeRef.current === '1v1' && (index === 0 || index === 3)
+      || modeRef.current === 'practice' && index === 0;
     athletes[0].group.getObjectByName('selector')!.visible = false;
     athletes[0].group.visible = true;
 
@@ -865,7 +867,7 @@ export default function Basketball3D() {
     const resetPositions = (team: Team = 0) => {
       athletes.forEach((player, index) => {
         const soloPosition = index === 0 ? new THREE.Vector3(-7.2, 0, 0) : new THREE.Vector3(7.2, 0, 0);
-        player.position.copy(modeRef.current === '1v1' && (index === 0 || index === 3) ? soloPosition : starts[index]);
+        player.position.copy(modeRef.current !== '3v3' && (index === 0 || index === 3) ? soloPosition : starts[index]);
         player.velocity.set(0, 0, 0); player.jump = 0; player.jumpV = 0; player.action = 0; player.actionKind = 'idle'; player.stealCooldown = 0.55 + index * 0.14; player.stumbleSide = index % 2 ? -1 : 1;
         player.moveKind = 'forward'; player.moveUntil = 0; player.dribblePhase = index * 0.17; player.dribbleHand = index % 2 ? 'left' : 'right';
         player.group.visible = isActiveIndex(index) && (index !== 0 || !viewModel);
@@ -879,9 +881,10 @@ export default function Basketball3D() {
 
     const resetGame = (mode: GameMode) => {
       modeRef.current = mode;
-      const duration = mode === '1v1' ? 60 : 90;
+      const duration = mode === '1v1' ? 60 : mode === 'practice' ? 0 : 90;
       gameTime = duration; gameScore = [0, 0]; sprint = 1; cameraYaw = Math.PI / 2; cameraPitch = -0.08; cameraEyeHeight = 1.86;
-      resetPositions(0); setScore([0, 0]); setClock(duration); setCharge(0); setDunkCharge(0); setStamina(1); showMessage(mode === '1v1' ? '单挑开球！' : '开球！', 800);
+      resetPositions(0); setScore([0, 0]); setClock(duration); setCharge(0); setDunkCharge(0); setStamina(1);
+      showMessage(mode === '1v1' ? '单挑开球！' : mode === 'practice' ? '自由练习·没有对手' : '开球！', 900);
     };
 
     const resolveShotStyle = (): ShotStyle => {
@@ -1101,7 +1104,7 @@ export default function Basketball3D() {
 
     const passBall = () => {
       if (ball.owner !== 0 || layingUp || dunking || shotPending) return false;
-      if (modeRef.current === '1v1') { showMessage('单挑没有队友，直接进攻！', 700); return false; }
+      if (modeRef.current !== '3v3') { showMessage(modeRef.current === 'practice' ? '练习模式没有队友' : '单挑没有队友，直接进攻！', 700); return false; }
       const me = athletes[0];
       const forward = new THREE.Vector3(Math.sin(cameraYaw), 0, -Math.cos(cameraYaw));
       const mates = [1, 2].sort((a, b) => {
@@ -1114,7 +1117,7 @@ export default function Basketball3D() {
     };
 
     const passOrCallForBall = () => {
-      if (modeRef.current === '1v1') { showMessage('单挑模式：没有传球', 650); return; }
+      if (modeRef.current !== '3v3') { showMessage(modeRef.current === 'practice' ? '练习模式：没有传球' : '单挑模式：没有传球', 650); return; }
       if (ball.owner === 0) { passBall(); return; }
       if (ball.owner !== null && athletes[ball.owner].team === 0) {
         const owner = ball.owner;
@@ -1325,7 +1328,8 @@ export default function Basketball3D() {
       if (ball.scored) return;
       ball.scored = true; ball.mode = 'dead'; ball.velocity.set(0, 0, 0);
       gameScore[team] += points; setScore([...gameScore] as [number, number]);
-      nextPossession = team === 0 ? 1 : 0; resetAt = now + 1.35;
+      nextPossession = modeRef.current === 'practice' ? 0 : team === 0 ? 1 : 0;
+      resetAt = now + 1.35;
       showMessage(points === 3 ? '三分命中！' : '进球！', 1050);
     };
 
@@ -2400,13 +2404,14 @@ export default function Basketball3D() {
       bindPeerChannel();
       blockCameraKick = Math.max(0, blockCameraKick - dt);
       if (phaseRef.current === 'playing') {
-        gameTime = Math.max(0, gameTime - dt); dribbleGrace = Math.max(0, dribbleGrace - dt); dashCooldown = Math.max(0, dashCooldown - dt); ankleBreakWindow = Math.max(0, ankleBreakWindow - dt);
+        if (modeRef.current !== 'practice') gameTime = Math.max(0, gameTime - dt);
+        dribbleGrace = Math.max(0, dribbleGrace - dt); dashCooldown = Math.max(0, dashCooldown - dt); ankleBreakWindow = Math.max(0, ankleBreakWindow - dt);
         if (delayedDashAt && performance.now() >= delayedDashAt) { delayedDashAt = 0; startDash(); }
         const wasDashing = dashTime > 0;
         dashTime = Math.max(0, dashTime - dt);
         if (wasDashing && dashTime === 0) { dashWithBall = false; spinDirection = 0; dribbleMove = dribbling ? resolveDribbleMove(false) : 'forward'; }
         if (!dribbling && dribbleGrace <= 0 && dashTime <= 0) dribbleMove = 'forward';
-        if (gameTime <= 0) { changePhase('over'); document.exitPointerLock?.(); }
+        if (modeRef.current !== 'practice' && gameTime <= 0) { changePhase('over'); document.exitPointerLock?.(); }
         if (resetAt && now >= resetAt) resetPositions(nextPossession);
         if (!resetAt) {
           if (dunking) dunkElapsed += dt;
@@ -2464,16 +2469,20 @@ export default function Basketball3D() {
   const chooseJersey = (color: string) => {
     jerseyRef.current = color; setJersey(color); runtimeRef.current?.setJersey(color);
   };
-  const timeText = `${Math.floor(clock / 60)}:${String(Math.ceil(clock % 60)).padStart(2, '0')}`;
+  const timeText = gameMode === 'practice' ? '∞' : `${Math.floor(clock / 60)}:${String(Math.ceil(clock % 60)).padStart(2, '0')}`;
 
   return (
     <main className="game3d">
       <canvas ref={canvasRef} tabIndex={0} aria-label="第一人称 3D 篮球场" />
-      <header className="hud3d"><div className="score3d home">{score[0]}</div><i>—</i><div className="score3d away">{score[1]}</div><time>{timeText}</time></header>
+      <header className={`hud3d ${gameMode === 'practice' ? 'practiceHud3d' : ''}`}>
+        <div className="score3d home">{score[0]}</div>
+        {gameMode === 'practice' ? <strong className="practiceLabel3d">练习得分</strong> : <><i>—</i><div className="score3d away">{score[1]}</div></>}
+        <time>{timeText}</time>
+      </header>
       {message && <div className="event3d">{message}</div>}
       {blockImpact && <div className="blockImpact3d" aria-live="assertive"><strong>BLOCK!</strong><span>封盖成功</span></div>}
       {phase === 'playing' && <>
-        <div className="room3d"><span>Room code: <b>{onlineMatch?.room.code ?? (gameMode === '1v1' ? '1101' : '1844')}</b></span><span>Region: asia</span><span>Type: {onlineMatch ? '1V1 online' : gameMode === '1v1' ? '1V1 practice' : '3V3 local'}</span><em>{onlineMatch ? '● P2P' : '⌁ Local'}</em></div>
+        <div className="room3d"><span>Room code: <b>{onlineMatch?.room.code ?? (gameMode === '1v1' ? '1101' : gameMode === 'practice' ? 'FREE' : '1844')}</b></span><span>Region: asia</span><span>Type: {onlineMatch ? '1V1 online' : gameMode === '1v1' ? '1V1 local' : gameMode === 'practice' ? 'SOLO practice' : '3V3 local'}</span><em>{onlineMatch ? '● P2P' : '⌁ Local'}</em></div>
         <div className="chat3d"><button className="exit3d" onClick={()=>changePhase('paused')}>Exit <kbd>P</kbd></button><div><button onClick={()=>setMessage('PASS!')}>PASS <kbd>1</kbd></button><button onClick={()=>setMessage('NICE!')}>NICE <kbd>2</kbd></button><button onClick={()=>setMessage('SORRY!')}>SORRY <kbd>3</kbd></button><span>CHAT</span></div></div>
         <div className="guide3d"><span>Jump / Block <kbd>LMB</kbd></span><span>Steal <kbd>Shift</kbd></span>{gameMode === '3v3' && <span>Pass / Call <kbd>F</kbd></span>}<span>Dash <kbd>Space</kbd></span><span>Dribble + Move <kbd>RMB</kbd></span><span>Burst Combo <kbd>RMB + Space</kbd></span><span>Running Layup <kbd>Run + LMB</kbd></span><span>Acrobatic Layup <kbd>Layup + Turn</kbd></span><span>Side-step Shot <kbd>A/D + Space + LMB</kbd></span><span>Fadeaway <kbd>S + Space + LMB</kbd></span><span>Shoot <kbd>LMB</kbd></span><span>Dunk / Putback <kbd>Tab</kbd></span></div>
         <div className="status3d"><i><b style={{height:`${stamina * 100}%`}}/></i>{charge > 0 && <i className="charge3d"><b style={{height:`${charge * 100}%`}}/></i>}{dunkCharge > 0 && <i className="dunk3d"><b style={{height:`${dunkCharge * 100}%`}}/></i>}</div>
@@ -2484,6 +2493,7 @@ export default function Basketball3D() {
         <nav><button onClick={()=>changePhase('rooms')}>JOIN ROOM <em>⌂</em></button><button>CUSTOMIZE <em>●</em></button><button>ABILITIES <em>◉</em></button></nav>
         <div className="jerseys3d"><span>球衣</span>{COLORS.map(color=><button key={color} onClick={()=>chooseJersey(color)} className={jersey===color?'active':''} style={{background:color}} aria-label={`选择 ${color} 球衣`}/>)}</div>
         <button className="quick3d" onClick={()=>startGame('3v3')}><span>QUICK PLAY</span><b>▶</b></button>
+        <button className="practice3d" onClick={startPractice}><span>PRACTICE</span><small>无对手 · 无限时投篮</small><b>◎</b></button>
         <p>第一人称 3V3 · 90 秒快速比赛</p>
       </section>}
 

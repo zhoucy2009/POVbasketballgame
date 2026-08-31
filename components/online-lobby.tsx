@@ -190,6 +190,6 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
       </div>)}
     </div>
     {error && <p className="lobbyError3d" role="alert">{error}</p>}
-    <div className="lobbyActions3d"><Button variant="outline" onClick={onPractice}>人机练习</Button><Button variant="ghost" onClick={onBack}>← 返回主菜单</Button></div>
+    <div className="lobbyActions3d"><Button variant="outline" onClick={onPractice}>无对手练习</Button><Button variant="ghost" onClick={onBack}>← 返回主菜单</Button></div>
   </>;
 }
