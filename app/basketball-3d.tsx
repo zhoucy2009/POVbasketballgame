@@ -140,6 +140,31 @@ export default function Basketball3D() {
     const camera = new THREE.PerspectiveCamera(76, 1, 0.035, 120);
     scene.add(camera);
 
+    // Keep the stable pre-Mixamo shooting pose for first-person releases. The
+    // imported body is hidden only during shooting, so this small overlay never
+    // competes with the mocap rig during running, dribbling, steals or blocks.
+    const shotSkin = new THREE.MeshStandardMaterial({ color: '#b97852', roughness: 0.72, depthTest: false, depthWrite: false });
+    const shotJersey = new THREE.MeshStandardMaterial({ color: jerseyRef.current, roughness: 0.5, depthTest: false, depthWrite: false });
+    const legacyShotArms = new THREE.Group();
+    const legacyShotLimbs = ([-1, 1] as const).map((side) => {
+      const arm = new THREE.Group();
+      const sleeve = new THREE.Mesh(new THREE.CapsuleGeometry(0.092, 0.2, 3, 8), shotJersey);
+      sleeve.position.y = -0.12;
+      const forearm = new THREE.Mesh(new THREE.CapsuleGeometry(0.074, 0.29, 3, 8), shotSkin);
+      forearm.position.y = -0.39;
+      const hand = new THREE.Mesh(new THREE.SphereGeometry(0.095, 10, 8), shotSkin);
+      hand.position.y = -0.63;
+      hand.scale.set(0.9, 1.12, 0.82);
+      [sleeve, forearm, hand].forEach((mesh) => { mesh.renderOrder = 20; arm.add(mesh); });
+      arm.position.set(side * 0.13, 0.02, -0.58);
+      arm.rotation.x = 1.35;
+      arm.rotation.z = side * -0.08;
+      legacyShotArms.add(arm);
+      return arm;
+    });
+    legacyShotArms.visible = false;
+    camera.add(legacyShotArms);
+
     scene.add(new THREE.HemisphereLight('#e9f8ff', '#4f3427', 2.7));
     const sun = new THREE.DirectionalLight('#fff4dc', 4.4);
     sun.position.set(-10, 24, 7);
@@ -520,62 +545,33 @@ export default function Basketball3D() {
         player.visual = visual;
       });
 
-      // The first-person body uses a single Mixamo skeleton for every imported
-      // action. Filtering by arm-bone weights keeps smooth shoulders, elbows,
-      // wrists and finger geometry while preventing the torso from crossing the
-      // near plane.
+      // Keep the Mixamo skin intact. Cutting a skinned mesh by per-vertex bone
+      // weights created the broken floating polygons visible in first person.
+      // Placing the intact body just behind the eye leaves only naturally
+      // animated arms in front of the near plane.
       viewModel = cloneSkeleton(mixamoCharacter) as THREE.Group;
       const viewBounds = new THREE.Box3().setFromObject(viewModel);
       const viewCenter = viewBounds.getCenter(new THREE.Vector3());
       const viewScale = 2.02 / Math.max(0.01, viewBounds.max.y - viewBounds.min.y);
       viewModel.scale.setScalar(viewScale);
-      viewModel.position.set(-viewCenter.x * viewScale, -viewBounds.min.y * viewScale - 1.88, -0.7 - viewCenter.z * viewScale);
+      viewModel.position.set(-viewCenter.x * viewScale, -viewBounds.min.y * viewScale - 1.65, 0.24 - viewCenter.z * viewScale);
       viewModel.rotation.y = Math.PI;
       viewModel.name = 'firstPersonRig';
       const viewSkinnedMeshes: THREE.SkinnedMesh[] = [];
       viewModel.traverse((object) => {
         if (!(object instanceof THREE.Mesh)) return;
         if (object instanceof THREE.SkinnedMesh) viewSkinnedMeshes.push(object);
-        if (object.name !== 'Beta_Surface' || !(object instanceof THREE.SkinnedMesh)) {
+        if (object.name !== 'Beta_Surface') {
           object.visible = false;
           return;
-        }
-        const sourceGeometry = object.geometry;
-        const sourceIndex = sourceGeometry.index;
-        const skinIndex = sourceGeometry.attributes.skinIndex;
-        const skinWeight = sourceGeometry.attributes.skinWeight;
-        if (skinIndex && skinWeight && object instanceof THREE.SkinnedMesh) {
-          const armBones = new Set(object.skeleton.bones
-            .map((bone, boneIndex) => (/Shoulder|Arm|ForeArm|Hand/i.test(bone.name) ? boneIndex : -1))
-            .filter((boneIndex) => boneIndex >= 0));
-          const armInfluence = (vertex: number) => {
-            const indices = [skinIndex.getX(vertex), skinIndex.getY(vertex), skinIndex.getZ(vertex), skinIndex.getW(vertex)];
-            const weights = [skinWeight.getX(vertex), skinWeight.getY(vertex), skinWeight.getZ(vertex), skinWeight.getW(vertex)];
-            return indices.reduce((total, boneIndex, influenceIndex) => total + (armBones.has(boneIndex) ? weights[influenceIndex] : 0), 0);
-          };
-          const armIndices: number[] = [];
-          const groups = sourceGeometry.groups.length ? sourceGeometry.groups : [{ start: 0, count: sourceGeometry.attributes.position.count, materialIndex: 0 }];
-          groups.forEach((group: { start: number; count: number; materialIndex: number }) => {
-            for (let offset = group.start; offset < group.start + group.count; offset += 3) {
-              const a = sourceIndex ? sourceIndex.getX(offset) : offset;
-              const b = sourceIndex ? sourceIndex.getX(offset + 1) : offset + 1;
-              const c = sourceIndex ? sourceIndex.getX(offset + 2) : offset + 2;
-              const minimumArmInfluence = Math.min(armInfluence(a), armInfluence(b), armInfluence(c));
-              if (minimumArmInfluence > 0.015) armIndices.push(a, b, c);
-            }
-          });
-          const viewGeometry = sourceGeometry.clone();
-          viewGeometry.setIndex(armIndices);
-          viewGeometry.clearGroups();
-          object.geometry = viewGeometry;
         }
         object.frustumCulled = false;
         object.renderOrder = 12;
         const materials = (Array.isArray(object.material) ? object.material : [object.material]).map((entry) => entry.clone());
         object.material = materials.length === 1 ? materials[0] : materials;
         materials.forEach((entry) => {
-          entry.depthTest = false;
-          entry.depthWrite = false;
+          entry.depthTest = true;
+          entry.depthWrite = true;
           if ('color' in entry && entry.color instanceof THREE.Color) entry.color.set('#c3835d');
         });
       });
@@ -1537,7 +1533,15 @@ export default function Basketball3D() {
 
     const updateCamera = () => {
       const me = athletes[0];
-      if (viewModel) viewModel.visible = phaseRef.current === 'playing';
+      const legacyShotVisible = phaseRef.current === 'playing' && (charging || shotPending || (me.actionKind === 'shoot' && me.action > 0) || (me.actionKind === 'pass' && me.action > 0));
+      legacyShotArms.visible = legacyShotVisible;
+      if (viewModel) viewModel.visible = phaseRef.current === 'playing' && !legacyShotVisible;
+      legacyShotLimbs.forEach((arm, armIndex) => {
+        const side = armIndex === 0 ? -1 : 1;
+        arm.position.set(side * 0.13, 0.02, -0.58);
+        arm.rotation.x = 1.35;
+        arm.rotation.z = side * -0.08;
+      });
       const forward = new THREE.Vector3(Math.sin(cameraYaw), 0, -Math.cos(cameraYaw));
       const moving = me.velocity.lengthSq() > 0.16 && me.jump < 0.06 && !dunking;
       const armClock = performance.now() / 1000;
@@ -1580,6 +1584,8 @@ export default function Basketball3D() {
           if (jerseyMesh) (jerseyMesh.material as THREE.MeshStandardMaterial).color.set(color);
           if (shortsMesh) (shortsMesh.material as THREE.MeshStandardMaterial).color.set(color).multiplyScalar(0.55);
         });
+        shotJersey.color.set(color);
+        shotJersey.needsUpdate = true;
       },
     };
 
