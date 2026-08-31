@@ -137,7 +137,9 @@ export default function Basketball3D() {
     // Keep the near plane close enough for the animated player's real hands and
     // forearms to remain visible from the eye camera. The previous camera-mounted
     // capsule arms were only a placeholder and could never match the mocap rig.
-    const camera = new THREE.PerspectiveCamera(76, 1, 0.035, 120);
+    // A slightly tighter first-person lens keeps players at normal human scale
+    // instead of making mid-court opponents look unusually small.
+    const camera = new THREE.PerspectiveCamera(72, 1, 0.035, 120);
     scene.add(camera);
 
     // Keep the stable pre-Mixamo shooting pose for first-person releases. The
@@ -475,13 +477,14 @@ export default function Basketball3D() {
         makeViewClip(mixamoRun, 'Mixamo_Run'),
       ];
 
+      const athleteHeights = [2.06, 2.1, 2.13, 2.11, 2.15, 2.09];
       athletes.forEach((player, index) => {
         const model = cloneSkeleton(character) as THREE.Group;
         model.name = 'rigModel';
         model.animations = [];
         const bounds = new THREE.Box3().setFromObject(model);
         const center = bounds.getCenter(new THREE.Vector3());
-        const scale = 2.02 / Math.max(0.01, bounds.max.y - bounds.min.y);
+        const scale = athleteHeights[index] / Math.max(0.01, bounds.max.y - bounds.min.y);
         model.scale.setScalar(scale);
         model.position.set(-center.x * scale, -bounds.min.y * scale, -center.z * scale);
 
@@ -552,7 +555,9 @@ export default function Basketball3D() {
       viewModel = cloneSkeleton(mixamoCharacter) as THREE.Group;
       const viewBounds = new THREE.Box3().setFromObject(viewModel);
       const viewCenter = viewBounds.getCenter(new THREE.Vector3());
-      const viewScale = 2.02 / Math.max(0.01, viewBounds.max.y - viewBounds.min.y);
+      // The camera-mounted body is a view model, so it needs a little less scale
+      // than the world athlete or nearby hands make the player feel oversized.
+      const viewScale = 1.94 / Math.max(0.01, viewBounds.max.y - viewBounds.min.y);
       viewModel.scale.setScalar(viewScale);
       viewModel.position.set(-viewCenter.x * viewScale, -viewBounds.min.y * viewScale - 1.65, 0.24 - viewCenter.z * viewScale);
       viewModel.rotation.y = Math.PI;
