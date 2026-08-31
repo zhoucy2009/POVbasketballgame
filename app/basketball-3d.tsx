@@ -66,7 +66,7 @@ const COURT_HALF_Z = COURT_WIDTH / 2;
 const HOOP_X = 18.7;
 const COURT_INSET = 1.1;
 const PLAYER_RUN_SPEED = 4.25;
-const SHOT_CONTEST_RADIUS = 1.18;
+const SHOT_CONTEST_RADIUS = 2.25;
 const BLOCK_HORIZONTAL_RADIUS = 0.82;
 const DUNK_START_RADIUS = 5.2;
 const DUNK_CONTEST_RADIUS = 1.05;
@@ -785,14 +785,25 @@ export default function Basketball3D() {
         const distance = new THREE.Vector2(defender.position.x - player.position.x, defender.position.z - player.position.z).length();
         return distance < nearest.distance ? { player: defender, distance } : nearest;
       }, { player: null, distance: Infinity });
+      const activeBlock = nearestDefender.player
+        && (nearestDefender.player.jump > 0.16 || nearestDefender.player.actionKind === 'jump' && nearestDefender.player.action > 0)
+        ? 0.34 + Math.min(0.22, nearestDefender.player.jump * 0.16)
+        : 0;
       const contestStrength = nearestDefender.distance < SHOT_CONTEST_RADIUS
-        ? clamp(1 - nearestDefender.distance / SHOT_CONTEST_RADIUS + (nearestDefender.player?.jump ?? 0) * 0.22, 0.18, 1)
+        ? clamp((1 - nearestDefender.distance / SHOT_CONTEST_RADIUS) * 0.78 + activeBlock, 0.12, 1)
         : 0;
       const stylePenalty = owner === 0 ? shotStyle === 'fade' ? 0.055 : shotStyle === 'normal' ? 0 : 0.025 : 0;
-      const chance = clamp(0.9 - Math.abs(power - ideal) * 1.6 - distance * 0.018 - contestStrength * 0.34 - stylePenalty, 0.12, 0.91);
-      const forcedMiss = contestStrength > 0 && Math.random() < 0.1 + contestStrength * 0.24;
+      const baseAccuracy = owner === 0 ? 0.9 : 0.76;
+      const timingPenalty = Math.abs(power - ideal) * (owner === 0 ? 1.6 : 1.25);
+      const chance = clamp(baseAccuracy - timingPenalty - distance * 0.02 - contestStrength * 0.55 - stylePenalty, 0.08, owner === 0 ? 0.89 : 0.78);
+      const forcedMiss = contestStrength > 0 && Math.random() < 0.08 + contestStrength * 0.42;
       ball.shotMake = !forcedMiss && Math.random() < chance;
-      if (contestStrength > 0.12) showMessage(owner === 0 ? '投篮受干扰！' : '成功干扰！', 780);
+      if (contestStrength > 0.12) {
+        const label = owner === 0
+          ? contestStrength > 0.62 ? '严重干扰！' : '投篮受干扰！'
+          : player.team === 0 ? '队友投篮受干扰！' : contestStrength > 0.62 ? '强力干扰！' : '成功干扰！';
+        showMessage(label, 780);
+      }
       ball.shotPoints = distance > 7 ? 3 : 2;
       const aim = target.clone();
       if (!ball.shotMake) aim.z += (Math.random() > 0.5 ? 1 : -1) * (0.72 + Math.random() * 0.6);
@@ -1067,12 +1078,13 @@ export default function Basketball3D() {
       const rimGround = rim.clone().setY(0);
       if (player.position.distanceTo(rimGround) > (putback ? 2.8 : 2.45)) return false;
       const contest = nearestDefenderDistance(owner);
+      const contestPressure = contest < 1.65 ? clamp(1 - contest / 1.65, 0, 1) : 0;
       player.jumpV = Math.max(player.jumpV, putback ? 7.9 : 7.45);
       player.action = putback ? 1.28 : 1.18;
       player.actionKind = 'dunk';
       player.facing = rim.x > player.position.x ? Math.PI / 2 : -Math.PI / 2;
       ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = putback ? 0.4 : 0.5; ball.shotPoints = 2; ball.scored = false;
-      ball.shotMake = Math.random() < clamp((putback ? 0.78 : 0.9) - (contest < 1.15 ? (1.15 - contest) * 0.24 : 0), 0.48, 0.94);
+      ball.shotMake = Math.random() < clamp((putback ? 0.63 : 0.76) - contestPressure * (putback ? 0.34 : 0.42), 0.2, 0.82);
       const from = getHandPosition(player, 'right');
       ball.position.copy(from);
       const t = ball.shotFlight;
@@ -1349,6 +1361,20 @@ export default function Basketball3D() {
       me.position.z = clamp(me.position.z, -COURT_HALF_Z + COURT_INSET, COURT_HALF_Z - COURT_INSET);
 
       const possession = ball.owner === null ? (ball.mode === 'pass' ? athletes[ball.lastOwner].team : null) : athletes[ball.owner].team;
+      const offensiveFocus = ball.owner ?? ball.passTarget ?? ball.lastOwner;
+      const primaryDefender: [number, number] = [-1, -1];
+      ([0, 1] as Team[]).forEach((defendingTeam) => {
+        if (athletes[offensiveFocus].team === defendingTeam) return;
+        const candidates = athletes
+          .map((candidate, candidateIndex) => ({ candidate, candidateIndex }))
+          .filter(({ candidate, candidateIndex }) => candidate.team === defendingTeam && candidateIndex !== 0);
+        primaryDefender[defendingTeam] = candidates.reduce((nearest, candidate) => {
+          if (nearest < 0) return candidate.candidateIndex;
+          const nearestDistance = athletes[nearest].position.distanceTo(athletes[offensiveFocus].position);
+          const candidateDistance = candidate.candidate.position.distanceTo(athletes[offensiveFocus].position);
+          return candidateDistance < nearestDistance ? candidate.candidateIndex : nearest;
+        }, -1);
+      });
       athletes.forEach((player, index) => {
         player.stealCooldown = Math.max(0, player.stealCooldown - dt);
         aiDecisionCooldown[index] = Math.max(0, aiDecisionCooldown[index] - dt);
@@ -1410,11 +1436,25 @@ export default function Basketball3D() {
             moveToward(player, target, PLAYER_RUN_SPEED * (cutting ? 1.08 : 0.96), dt);
           }
         } else if (possession !== null) {
-          const markIndex = player.team === 0 ? index + 3 : index - 3;
+          const isPrimaryDefender = primaryDefender[player.team] === index;
+          const markIndex = isPrimaryDefender ? offensiveFocus : player.team === 0 ? index + 3 : index - 3;
           const mark = athletes[markIndex];
-          const target = mark.position.clone(); target.x -= attack * 1.15;
-          moveToward(player, target, PLAYER_RUN_SPEED, dt);
+          const target = mark.position.clone(); target.x -= attack * (isPrimaryDefender ? 0.78 : 1.12);
+          if (!isPrimaryDefender && ball.owner !== null) {
+            const carrier = athletes[ball.owner];
+            const carrierNearRim = carrier.position.distanceTo(hoop(carrier.team).setY(0)) < 4.5;
+            if (carrierNearRim && player.position.distanceTo(carrier.position) < 4.2) target.lerp(carrier.position, 0.34);
+          }
+          moveToward(player, target, PLAYER_RUN_SPEED * (isPrimaryDefender ? 1.08 : 0.98), dt);
           const reachDistance = player.position.distanceTo(mark.position);
+          const shootingThreat = ball.owner === markIndex
+            && (mark.actionKind === 'shoot' && mark.action > 0.15 || markIndex === 0 && (charging || shotPending));
+          if (isPrimaryDefender && shootingThreat && reachDistance < SHOT_CONTEST_RADIUS + 0.28 && player.jump < 0.03) {
+            player.jumpV = 6.7;
+            player.action = 0.76;
+            player.actionKind = 'jump';
+            player.velocity.multiplyScalar(0.45);
+          }
           if (!dunking && ball.owner === markIndex && reachDistance < 1.5 && player.stealCooldown <= 0) {
             player.stealCooldown = 1.05 + (index % 3) * 0.12;
             const ankleBreakChance = dribbleMove === 'spin-left' || dribbleMove === 'spin-right' ? 0.82
