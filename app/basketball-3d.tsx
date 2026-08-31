@@ -761,6 +761,7 @@ export default function Basketball3D() {
     const stationaryTime = Array.from({ length: athletes.length }, () => 0);
     const separationMoveUntil = Array.from({ length: athletes.length }, () => 0);
     const contactPressure = Array.from({ length: athletes.length }, () => 0);
+    const blockAttemptUntil = Array.from({ length: athletes.length }, () => 0);
     const aiShotPlans: Array<AiShotPlan | null> = Array.from({ length: athletes.length }, () => null);
     const teamTactics: [TeamTactic | null, TeamTactic | null] = [null, null];
     let stealProtectionUntil = 0;
@@ -773,6 +774,7 @@ export default function Basketball3D() {
     let blockFeedbackTimer: number | undefined;
     type PeerPlayerState = { seq: number; x: number; z: number; vx: number; vz: number; facing: number; jump: number; action: number; actionKind: MotionName; moveKind: DribbleMove };
     type PeerCommand = { kind: 'shot'; power: number } | { kind: 'layup'; acrobatic: boolean } | { kind: 'jump' | 'steal' | 'dunk' };
+    type PeerEvent = { kind: 'block'; blocker: number };
     type WorldState = { seq: number; ball: { x: number; y: number; z: number; vx: number; vy: number; vz: number; owner: number | null; mode: BallMode }; score: [number, number]; time: number };
     let boundPeerChannel: RTCDataChannel | null = null;
     let boundStateChannel: RTCDataChannel | null = null;
@@ -814,8 +816,13 @@ export default function Basketball3D() {
         boundPeerChannel = channel;
         channel.addEventListener('message', (event) => {
           try {
-            const message = JSON.parse(String(event.data)) as { type: string; command?: PeerCommand; player?: PeerPlayerState; world?: WorldState };
+            const message = JSON.parse(String(event.data)) as { type: string; command?: PeerCommand; event?: PeerEvent; player?: PeerPlayerState; world?: WorldState };
             if (message.type === 'command' && message.command) peerCommands.push(message.command);
+            if (message.type === 'event' && message.event?.kind === 'block' && onlineSessionRef.current?.role === 'guest') {
+              const localPlayerBlocked = message.event.blocker === 3;
+              showMessage(localPlayerBlocked ? '钉板大帽！' : '被对手封盖！', 1200);
+              if (localPlayerBlocked) showBlockFeedback();
+            }
             if (message.type === 'keyframe') {
               const receivedAt = performance.now() / 1000;
               acceptPlayerState(message.player, receivedAt);
@@ -932,7 +939,7 @@ export default function Basketball3D() {
         player.moveKind = 'forward'; player.moveUntil = 0; player.dribblePhase = index * 0.17; player.dribbleHand = index % 2 ? 'left' : 'right';
         player.group.visible = isActiveIndex(index) && (index !== 0 || !viewModel);
         aiDecisionCooldown[index] = 0.2 + index * 0.08; aiPassCooldown[index] = 0; aiShotCooldown[index] = 0.8 + index * 0.08;
-        stationaryTime[index] = 0; separationMoveUntil[index] = 0; contactPressure[index] = 0; aiShotPlans[index] = null;
+        stationaryTime[index] = 0; separationMoveUntil[index] = 0; contactPressure[index] = 0; blockAttemptUntil[index] = 0; aiShotPlans[index] = null;
       });
       const owner = team === 0 ? 0 : 3;
       ball.owner = owner; ball.lastOwner = owner; ball.mode = 'held'; ball.passTarget = null; ball.scored = false; ball.velocity.set(0, 0, 0);
@@ -1231,6 +1238,7 @@ export default function Basketball3D() {
       const me = athletes[0];
       if (me.jump < 0.04) {
         me.jumpV = 7.2; me.action = 0.72; me.actionKind = 'jump';
+        blockAttemptUntil[0] = performance.now() / 1000 + 0.5;
         if (onlineSessionRef.current?.role === 'guest') {
           sendPeer({ type: 'command', command: { kind: 'jump' } satisfies PeerCommand });
         }
@@ -1987,15 +1995,30 @@ export default function Basketball3D() {
         ball.group.rotation.z += dt * 8;
         keepBallOnCourt();
 
-        const user = athletes[0];
-        if (ball.mode === 'shot' && athletes[ball.lastOwner].team === 1 && user.jump > 0.38 && user.position.distanceTo(new THREE.Vector3(ball.position.x, 0, ball.position.z)) < BLOCK_HORIZONTAL_RADIUS && ball.position.y < user.jump + 2.38) {
+        const shooterTeam = athletes[ball.lastOwner].team;
+        const ballGround = new THREE.Vector3(ball.position.x, 0, ball.position.z);
+        const blockerIndex = ball.mode === 'shot' ? athletes.findIndex((defender, index) => {
+          if (!isActiveIndex(index) || defender.team === shooterTeam) return false;
+          const activeAttempt = now <= blockAttemptUntil[index];
+          const blockReach = Math.max(defender.jump, activeAttempt ? 0.72 : 0);
+          const reachRadius = BLOCK_HORIZONTAL_RADIUS + (index === 3 && onlineSessionRef.current ? 0.18 : 0);
+          return (activeAttempt || defender.actionKind === 'jump')
+            && horizontalDistance(defender.position, ballGround) < reachRadius
+            && ball.position.y > 0.78 + blockReach
+            && ball.position.y < 2.42 + blockReach;
+        }) : -1;
+        if (blockerIndex >= 0) {
           const shooter = athletes[ball.lastOwner];
           ball.mode = 'loose';
           ball.shotAge = 0;
           ball.velocity.set(-ball.velocity.x * 0.72, 5.1, -ball.velocity.z * 0.4 + (Math.random() - 0.5) * 4.2);
           shooter.action = Math.max(shooter.action, 0.58); shooter.actionKind = 'stumble';
-          showMessage('钉板大帽！', 1200);
-          showBlockFeedback();
+          blockAttemptUntil[blockerIndex] = 0;
+          showMessage(blockerIndex === 0 ? '钉板大帽！' : '被对手封盖！', 1200);
+          if (blockerIndex === 0) showBlockFeedback();
+          if (onlineSessionRef.current?.role === 'host') {
+            sendPeer({ type: 'event', event: { kind: 'block', blocker: blockerIndex } satisfies PeerEvent });
+          }
         }
 
         if (!ball.scored && (ball.mode === 'shot' || ball.mode === 'loose')) {
@@ -2665,6 +2688,7 @@ export default function Basketball3D() {
         } else if (command.kind === 'dunk') {
           if (ball.owner === 3) startAiDunk(3);
         } else if (command.kind === 'jump') {
+          blockAttemptUntil[3] = now + 0.5;
           if (remote.jump < 0.04) { remote.jumpV = 7.2; remote.action = 0.72; remote.actionKind = 'jump'; }
         } else if (remote.stealCooldown <= 0) {
           remote.stealCooldown = USER_STEAL_COOLDOWN;
