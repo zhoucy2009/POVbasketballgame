@@ -133,7 +133,7 @@ export default function Basketball3D() {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color('#84bee3');
     scene.fog = new THREE.Fog('#b9d7e8', 38, 82);
-    const camera = new THREE.PerspectiveCamera(68, 1, 0.1, 120);
+    const camera = new THREE.PerspectiveCamera(76, 1, 0.04, 120);
 
     scene.add(new THREE.HemisphereLight('#e9f8ff', '#4f3427', 2.7));
     const sun = new THREE.DirectionalLight('#fff4dc', 4.4);
@@ -342,7 +342,8 @@ export default function Basketball3D() {
       number: [16, 11, 23, 3, 8, 14][index], jump: 0, jumpV: 0, action: 0, facing: index < 3 ? Math.PI / 2 : -Math.PI / 2,
       actionKind: 'idle',
     }));
-    athletes[0].group.getObjectByName('selector')!.visible = true;
+    athletes[0].group.getObjectByName('selector')!.visible = false;
+    athletes[0].group.visible = false;
 
     let rigCancelled = false;
     const rigLoader = new FBXLoader();
@@ -1389,14 +1390,14 @@ export default function Basketball3D() {
     const updateCamera = () => {
       const me = athletes[0];
       const forward = new THREE.Vector3(Math.sin(cameraYaw), 0, -Math.cos(cameraYaw));
-      const specialShotCamera = shotStyle !== 'normal' && (charging || shotPending || (me.actionKind === 'shoot' && me.action > 0));
-      const followDistance = dunking ? 4.2 : 3.05;
-      const followHeight = dunking ? 2.32 : 1.98;
-      const lookAhead = dunking ? 2.8 : 5.4;
-      const desired = me.position.clone().addScaledVector(forward, -followDistance).add(new THREE.Vector3(0, followHeight + me.jump * 0.1 - cameraPitch * 0.28, 0));
-      camera.position.lerp(desired, dunking ? 0.32 : specialShotCamera ? 0.075 : 0.26);
-      const look = me.position.clone().addScaledVector(forward, lookAhead).add(new THREE.Vector3(0, (dunking ? 1.5 : 1.22) + cameraPitch * 4.4 + me.jump * 0.12, 0));
-      camera.lookAt(look);
+      const moving = me.velocity.lengthSq() > 0.16 && me.jump < 0.06 && !dunking;
+      const bob = moving ? Math.sin(performance.now() * 0.012) * 0.025 : 0;
+      const eye = me.position.clone().addScaledVector(forward, 0.11);
+      eye.y = 1.68 + me.jump + bob;
+      camera.position.copy(eye);
+      const lookDirection = forward.multiplyScalar(Math.cos(cameraPitch));
+      lookDirection.y = Math.sin(cameraPitch);
+      camera.lookAt(eye.clone().addScaledVector(lookDirection.normalize(), 14));
     };
 
     const resize = () => {
@@ -1483,10 +1484,11 @@ export default function Basketball3D() {
 
   return (
     <main className="game3d">
-      <canvas ref={canvasRef} tabIndex={0} aria-label="第三人称 3D 篮球场" />
+      <canvas ref={canvasRef} tabIndex={0} aria-label="第一人称 3D 篮球场" />
       <header className="hud3d"><div className="score3d home">{score[0]}</div><i>—</i><div className="score3d away">{score[1]}</div><time>{timeText}</time></header>
       {message && <div className="event3d">{message}</div>}
       {phase === 'playing' && <>
+        <div className="crosshair3d" aria-hidden="true"><i/><i/></div>
         <div className="room3d"><span>Room code: <b>1844</b></span><span>Region: asia</span><span>Type: local</span><em>⌁ Ping: 18</em></div>
         <div className="chat3d"><button className="exit3d" onClick={()=>changePhase('paused')}>Exit <kbd>P</kbd></button><div><button onClick={()=>setMessage('PASS!')}>PASS <kbd>1</kbd></button><button onClick={()=>setMessage('NICE!')}>NICE <kbd>2</kbd></button><button onClick={()=>setMessage('SORRY!')}>SORRY <kbd>3</kbd></button><span>CHAT</span></div></div>
         <div className="guide3d"><span>Jump / Block <kbd>LMB</kbd></span><span>Steal <kbd>Shift</kbd></span><span>Pass <kbd>F</kbd></span><span>Dash <kbd>Space</kbd></span><span>Dribble + Move <kbd>RMB</kbd></span><span>Burst Combo <kbd>RMB + Space</kbd></span><span>Side-step Shot <kbd>A/D + Space + LMB</kbd></span><span>Fadeaway <kbd>S + Space + LMB</kbd></span><span>Shoot <kbd>LMB</kbd></span><span>Dunk / Putback <kbd>Tab</kbd></span></div>
@@ -1498,7 +1500,7 @@ export default function Basketball3D() {
         <nav><button>JOIN ROOM <em>⌂</em></button><button>CUSTOMIZE <em>●</em></button><button>ABILITIES <em>◉</em></button></nav>
         <div className="jerseys3d"><span>球衣</span>{COLORS.map(color=><button key={color} onClick={()=>chooseJersey(color)} className={jersey===color?'active':''} style={{background:color}} aria-label={`选择 ${color} 球衣`}/>)}</div>
         <button className="quick3d" onClick={startGame}><span>QUICK PLAY</span><b>▶</b></button>
-        <p>第三人称 3V3 · 90 秒快速比赛</p>
+        <p>第一人称 3V3 · 90 秒快速比赛</p>
       </section>}
 
       {(phase === 'paused' || phase === 'over') && <section className="pause3d">

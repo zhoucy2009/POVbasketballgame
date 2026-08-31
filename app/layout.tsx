@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: 'Unmatched Hoops — 街头篮球',
-  description: '第三人称 3D 街头篮球：实时镜头、运球、传球、抢断、篮板、盖帽与投篮。',
+  description: '第一人称 3D 街头篮球：实时镜头、运球、传球、抢断、篮板、盖帽与投篮。',
 };
 
 export default function RootLayout({
