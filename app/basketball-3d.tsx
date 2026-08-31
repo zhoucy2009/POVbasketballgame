@@ -133,7 +133,7 @@ export default function Basketball3D() {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color('#84bee3');
     scene.fog = new THREE.Fog('#b9d7e8', 38, 82);
-    const camera = new THREE.PerspectiveCamera(76, 1, 0.04, 120);
+    const camera = new THREE.PerspectiveCamera(76, 1, 0.1, 120);
 
     scene.add(new THREE.HemisphereLight('#e9f8ff', '#4f3427', 2.7));
     const sun = new THREE.DirectionalLight('#fff4dc', 4.4);
@@ -343,7 +343,7 @@ export default function Basketball3D() {
       actionKind: 'idle',
     }));
     athletes[0].group.getObjectByName('selector')!.visible = false;
-    athletes[0].group.visible = false;
+    athletes[0].group.visible = true;
 
     let rigCancelled = false;
     const rigLoader = new FBXLoader();
@@ -462,6 +462,7 @@ export default function Basketball3D() {
         const texture = new THREE.CanvasTexture(numberCanvas); texture.colorSpace = THREE.SRGBColorSpace;
         const numberMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.46, 0.54), new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide }));
         numberMesh.name = 'rigNumber'; numberMesh.position.set(0, 1.43, -0.36); numberMesh.rotation.y = Math.PI;
+        numberMesh.visible = index !== 0;
         player.group.add(numberMesh);
 
         const mixer = new THREE.AnimationMixer(model);
@@ -856,7 +857,7 @@ export default function Basketball3D() {
       const pointerLocked = document.pointerLockElement === canvas;
       if (!pointerLocked && !dragLooking) return;
       cameraYaw += event.movementX * 0.0019;
-      cameraPitch = clamp(cameraPitch - event.movementY * 0.00155, -0.42, 0.46);
+      cameraPitch = clamp(cameraPitch - event.movementY * 0.00155, -1.05, 0.65);
       athletes[0].facing = Math.PI - cameraYaw;
     };
     const onPointerLock = () => {
@@ -1392,8 +1393,8 @@ export default function Basketball3D() {
       const forward = new THREE.Vector3(Math.sin(cameraYaw), 0, -Math.cos(cameraYaw));
       const moving = me.velocity.lengthSq() > 0.16 && me.jump < 0.06 && !dunking;
       const bob = moving ? Math.sin(performance.now() * 0.012) * 0.025 : 0;
-      const eye = me.position.clone().addScaledVector(forward, 0.11);
-      eye.y = 1.68 + me.jump + bob;
+      const eye = me.position.clone().addScaledVector(forward, 0.3);
+      eye.y = 1.7 + me.jump + bob;
       camera.position.copy(eye);
       const lookDirection = forward.multiplyScalar(Math.cos(cameraPitch));
       lookDirection.y = Math.sin(cameraPitch);
