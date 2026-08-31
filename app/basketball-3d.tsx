@@ -88,6 +88,7 @@ export default function Basketball3D() {
   const [dunkCharge, setDunkCharge] = useState(0);
   const [stamina, setStamina] = useState(1);
   const [message, setMessage] = useState('');
+  const [blockImpact, setBlockImpact] = useState(false);
   const [jersey, setJersey] = useState(COLORS[0]);
 
   const changePhase = useCallback((next: Phase) => {
@@ -134,6 +135,27 @@ export default function Basketball3D() {
     scene.background = new THREE.Color('#84bee3');
     scene.fog = new THREE.Fog('#b9d7e8', 38, 82);
     const camera = new THREE.PerspectiveCamera(76, 1, 0.1, 120);
+    scene.add(camera);
+
+    const viewSkin = new THREE.MeshStandardMaterial({ color: '#b97852', roughness: 0.72, depthTest: false, depthWrite: false });
+    const viewJersey = new THREE.MeshStandardMaterial({ color: jerseyRef.current, roughness: 0.5, depthTest: false, depthWrite: false });
+    const firstPersonArms = new THREE.Group();
+    firstPersonArms.name = 'firstPersonArms';
+    const viewArms = ([-1, 1] as const).map((side) => {
+      const arm = new THREE.Group();
+      const sleeve = new THREE.Mesh(new THREE.CapsuleGeometry(0.092, 0.2, 3, 8), viewJersey);
+      sleeve.position.y = -0.12;
+      const forearm = new THREE.Mesh(new THREE.CapsuleGeometry(0.074, 0.29, 3, 8), viewSkin);
+      forearm.position.y = -0.39;
+      const hand = new THREE.Mesh(new THREE.SphereGeometry(0.095, 10, 8), viewSkin);
+      hand.position.y = -0.63; hand.scale.set(0.9, 1.12, 0.82);
+      [sleeve, forearm, hand].forEach((mesh) => { mesh.renderOrder = 20; arm.add(mesh); });
+      arm.position.set(side * 0.34, -0.24, -0.62);
+      firstPersonArms.add(arm);
+      return arm;
+    });
+    firstPersonArms.visible = false;
+    camera.add(firstPersonArms);
 
     scene.add(new THREE.HemisphereLight('#e9f8ff', '#4f3427', 2.7));
     const sun = new THREE.DirectionalLight('#fff4dc', 4.4);
@@ -551,10 +573,19 @@ export default function Basketball3D() {
     let uiAt = 0;
     let last = performance.now() / 1000;
     let dragLooking = false;
+    let blockCameraKick = 0;
+    let blockFeedbackTimer: number | undefined;
 
     const showMessage = (text: string, duration = 700) => {
       setMessage(text);
       window.setTimeout(() => setMessage((current) => current === text ? '' : current), duration);
+    };
+    const showBlockFeedback = () => {
+      blockCameraKick = 0.24;
+      setBlockImpact(false);
+      window.requestAnimationFrame(() => setBlockImpact(true));
+      if (blockFeedbackTimer) window.clearTimeout(blockFeedbackTimer);
+      blockFeedbackTimer = window.setTimeout(() => setBlockImpact(false), 760);
     };
     const hoop = (team: Team) => new THREE.Vector3(team === 0 ? HOOP_X : -HOOP_X, 3.05, 0);
     const oppositeHand = (hand: DribbleHand): DribbleHand => hand === 'right' ? 'left' : 'right';
@@ -1063,7 +1094,12 @@ export default function Basketball3D() {
 
         const user = athletes[0];
         if (ball.mode === 'shot' && athletes[ball.lastOwner].team === 1 && user.jump > 0.38 && user.position.distanceTo(new THREE.Vector3(ball.position.x, 0, ball.position.z)) < BLOCK_HORIZONTAL_RADIUS && ball.position.y < user.jump + 2.38) {
-          ball.mode = 'loose'; ball.velocity.set(-ball.velocity.x * 0.45, 3.8, ball.velocity.z + (Math.random() - 0.5) * 3); showMessage('盖帽！', 1000);
+          const shooter = athletes[ball.lastOwner];
+          ball.mode = 'loose';
+          ball.velocity.set(-ball.velocity.x * 0.72, 5.1, -ball.velocity.z * 0.4 + (Math.random() - 0.5) * 4.2);
+          shooter.action = Math.max(shooter.action, 0.58); shooter.actionKind = 'stumble';
+          showMessage('钉板大帽！', 1200);
+          showBlockFeedback();
         }
 
         if (ball.mode === 'shot' && !ball.scored && ball.shotAge >= ball.shotFlight) {
@@ -1392,13 +1428,61 @@ export default function Basketball3D() {
       const me = athletes[0];
       const forward = new THREE.Vector3(Math.sin(cameraYaw), 0, -Math.cos(cameraYaw));
       const moving = me.velocity.lengthSq() > 0.16 && me.jump < 0.06 && !dunking;
-      const bob = moving ? Math.sin(performance.now() * 0.012) * 0.025 : 0;
+      const armClock = performance.now() / 1000;
+      const bob = moving ? Math.sin(armClock * 12) * 0.025 : 0;
       const eye = me.position.clone().addScaledVector(forward, 0.3);
       eye.y = 1.7 + me.jump + bob;
       camera.position.copy(eye);
       const lookDirection = forward.multiplyScalar(Math.cos(cameraPitch));
       lookDirection.y = Math.sin(cameraPitch);
       camera.lookAt(eye.clone().addScaledVector(lookDirection.normalize(), 14));
+
+      firstPersonArms.visible = phaseRef.current === 'playing';
+      viewArms.forEach((arm, armIndex) => {
+        const side = armIndex === 0 ? -1 : 1;
+        const targetPosition = new THREE.Vector3(side * 0.34, -0.24 + bob * 0.7, -0.62);
+        let targetRotationX = moving ? Math.sin(armClock * 10 + armIndex * Math.PI) * 0.16 : 0;
+        let targetRotationZ = side * 0.08;
+        const shooting = charging || shotPending || (me.actionKind === 'shoot' && me.action > 0);
+        const blocking = me.actionKind === 'jump' && me.action > 0;
+        const stealing = me.actionKind === 'steal' && me.action > 0;
+        const passing = me.actionKind === 'pass' && me.action > 0;
+        const dunkPose = me.actionKind === 'dunk' && me.action > 0;
+        if (shooting) {
+          targetPosition.set(side * 0.13, 0.02, -0.58);
+          targetRotationX = 1.35; targetRotationZ = side * -0.08;
+        } else if (blocking) {
+          targetPosition.set(side * 0.2, 0.32, -0.55);
+          targetRotationX = 0.08; targetRotationZ = Math.PI + side * 0.08;
+        } else if (stealing) {
+          const lead = side > 0;
+          targetPosition.set(side * (lead ? 0.12 : 0.3), lead ? -0.02 : -0.25, lead ? -0.72 : -0.58);
+          targetRotationX = lead ? 1.48 : -0.18; targetRotationZ = side * 0.06;
+        } else if (passing) {
+          targetPosition.set(side * 0.14, -0.02, -0.68);
+          targetRotationX = 1.42; targetRotationZ = side * -0.05;
+        } else if (dunkPose) {
+          const lead = side > 0;
+          targetPosition.set(side * 0.18, lead ? 0.32 : 0.03, -0.57);
+          targetRotationX = lead ? 0.12 : 1.1; targetRotationZ = lead ? Math.PI + 0.08 : side * -0.06;
+        } else if (ball.owner === 0) {
+          const lead = (dribbleHand === 'right' && side > 0) || (dribbleHand === 'left' && side < 0);
+          if (lead) {
+            targetPosition.y -= 0.08 + Math.max(0, Math.sin(armClock * 12)) * 0.12;
+            targetRotationX = 0.32 + Math.sin(armClock * 12) * 0.24;
+          }
+        }
+        arm.position.lerp(targetPosition, 0.24);
+        arm.rotation.x += (targetRotationX - arm.rotation.x) * 0.24;
+        arm.rotation.z += (targetRotationZ - arm.rotation.z) * 0.24;
+      });
+
+      if (blockCameraKick > 0) {
+        const strength = blockCameraKick / 0.24;
+        camera.position.x += (Math.random() - 0.5) * 0.055 * strength;
+        camera.position.y += (Math.random() - 0.5) * 0.045 * strength;
+        camera.rotation.z += (Math.random() - 0.5) * 0.045 * strength;
+      }
     };
 
     const resize = () => {
@@ -1418,6 +1502,7 @@ export default function Basketball3D() {
           if (jerseyMesh) (jerseyMesh.material as THREE.MeshStandardMaterial).color.set(color);
           if (shortsMesh) (shortsMesh.material as THREE.MeshStandardMaterial).color.set(color).multiplyScalar(0.55);
         });
+        viewJersey.color.set(color); viewJersey.needsUpdate = true;
       },
     };
 
@@ -1425,6 +1510,7 @@ export default function Basketball3D() {
     const loop = () => {
       const now = performance.now() / 1000;
       const dt = Math.min(0.032, now - last); last = now;
+      blockCameraKick = Math.max(0, blockCameraKick - dt);
       if (phaseRef.current === 'playing') {
         gameTime = Math.max(0, gameTime - dt); aiShotCooldown -= dt; dribbleGrace = Math.max(0, dribbleGrace - dt); dashCooldown = Math.max(0, dashCooldown - dt); ankleBreakWindow = Math.max(0, ankleBreakWindow - dt);
         if (delayedDashAt && performance.now() >= delayedDashAt) { delayedDashAt = 0; startDash(); }
@@ -1460,6 +1546,7 @@ export default function Basketball3D() {
 
     return () => {
       rigCancelled = true;
+      if (blockFeedbackTimer) window.clearTimeout(blockFeedbackTimer);
       cancelAnimationFrame(frame);
       runtimeRef.current = null;
       document.removeEventListener('keydown', onKeyDown); document.removeEventListener('keyup', onKeyUp);
@@ -1488,6 +1575,7 @@ export default function Basketball3D() {
       <canvas ref={canvasRef} tabIndex={0} aria-label="第一人称 3D 篮球场" />
       <header className="hud3d"><div className="score3d home">{score[0]}</div><i>—</i><div className="score3d away">{score[1]}</div><time>{timeText}</time></header>
       {message && <div className="event3d">{message}</div>}
+      {blockImpact && <div className="blockImpact3d" aria-live="assertive"><strong>BLOCK!</strong><span>封盖成功</span></div>}
       {phase === 'playing' && <>
         <div className="crosshair3d" aria-hidden="true"><i/><i/></div>
         <div className="room3d"><span>Room code: <b>1844</b></span><span>Region: asia</span><span>Type: local</span><em>⌁ Ping: 18</em></div>
