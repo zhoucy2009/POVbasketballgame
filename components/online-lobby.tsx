@@ -38,7 +38,6 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
   const queuedIceRef = useRef<RTCIceCandidateInit[]>([]);
   const handedOffRef = useRef(false);
   const lastControlDataAtRef = useRef(0);
-  const lastStateDataAtRef = useRef(0);
   const lastRestartAtRef = useRef(0);
   const restartTimerRef = useRef<number | undefined>(undefined);
 
@@ -52,7 +51,9 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
   }, []);
 
   const updateChannelReady = useCallback(() => {
-    setChannelReady(channelRef.current?.readyState === 'open' && stateChannelRef.current?.readyState === 'open');
+    // The reliable control channel also carries complete keyframes, so it is
+    // sufficient to start and sustain a match when the low-latency channel is slow.
+    setChannelReady(channelRef.current?.readyState === 'open');
   }, []);
 
   const bindChannel = useCallback((channel: RTCDataChannel) => {
@@ -60,15 +61,20 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
     if (isStateChannel) stateChannelRef.current = channel;
     else channelRef.current = channel;
     channel.onopen = () => {
-      if (isStateChannel) lastStateDataAtRef.current = Date.now();
-      else lastControlDataAtRef.current = Date.now();
+      if (!isStateChannel) lastControlDataAtRef.current = Date.now();
       updateChannelReady();
     };
-    channel.onclose = () => { updateChannelReady(); setError('对手连接中断，正在重连…'); };
-    channel.onerror = () => setError('网络波动，正在恢复连接…');
+    channel.onclose = () => {
+      updateChannelReady();
+      if (isStateChannel && channelRef.current?.readyState === 'open') setError('');
+      else setError('对手连接中断，正在重连…');
+    };
+    channel.onerror = () => {
+      if (!(isStateChannel && channelRef.current?.readyState === 'open')) setError('网络波动，正在恢复连接…');
+    };
     channel.addEventListener('message', () => {
-      if (isStateChannel) lastStateDataAtRef.current = Date.now();
-      else lastControlDataAtRef.current = Date.now();
+      if (!isStateChannel) lastControlDataAtRef.current = Date.now();
+      if (pcRef.current?.connectionState === 'connected') setError('');
     });
     updateChannelReady();
   }, [updateChannelReady]);
@@ -77,12 +83,10 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
     const pc = pcRef.current;
     const room = roomRef.current;
     const meId = meIdRef.current;
-    if (!pc || !room || !meId || Date.now() - lastRestartAtRef.current < 3_500) return;
+    if (!pc || !room || !meId || Date.now() - lastRestartAtRef.current < 8_000) return;
     lastRestartAtRef.current = Date.now();
     try {
       if (room.hostId === meId) {
-        if (!channelRef.current || channelRef.current.readyState === 'closed') bindChannel(pc.createDataChannel('unmatched-control', { ordered: true }));
-        if (!stateChannelRef.current || stateChannelRef.current.readyState === 'closed') bindChannel(pc.createDataChannel('unmatched-state', { ordered: false, maxPacketLifeTime: 180 }));
         pc.restartIce();
         const offer = await pc.createOffer({ iceRestart: true });
         await pc.setLocalDescription(offer);
@@ -93,7 +97,7 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
     } catch {
       setError('正在重试对局连接…');
     }
-  }, [bindChannel, sendSignal]);
+  }, [sendSignal]);
 
   const setupPeer = useCallback(async (room: OnlineRoom, meId: string) => {
     if (pcRef.current) return;
@@ -114,7 +118,7 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
         if (restartTimerRef.current) window.clearTimeout(restartTimerRef.current);
         restartTimerRef.current = window.setTimeout(() => {
           if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') void restartConnection();
-        }, pc.connectionState === 'failed' ? 0 : 1_200);
+        }, pc.connectionState === 'failed' ? 0 : 3_000);
       }
     };
     if (room.hostId === meId) {
@@ -194,7 +198,7 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
       }
       const channel = channelRef.current;
       const stateChannel = stateChannelRef.current;
-      if (data.room?.status === 'playing' && channel?.readyState === 'open' && stateChannel?.readyState === 'open' && !handedOffRef.current) {
+      if (data.room?.status === 'playing' && channel?.readyState === 'open' && stateChannel && !handedOffRef.current) {
         handedOffRef.current = true;
         onMatchStart({ room: data.room, role: data.room.hostId === data.me.id ? 'host' : 'guest', channel, stateChannel });
       }
@@ -212,14 +216,13 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
       const control = channelRef.current;
       if (!handedOffRef.current) return;
       if (control?.readyState === 'open') control.send(JSON.stringify({ type: 'heartbeat', at: Date.now() }));
-      const stateStall = lastStateDataAtRef.current ? Date.now() - lastStateDataAtRef.current : 0;
-      if (stateStall > 1_600) {
-        setError('对手位置数据暂停，正在自动恢复…');
-        if (stateStall > 3_200 && roomRef.current?.hostId === meIdRef.current && stateChannelRef.current?.readyState === 'open') {
-          stateChannelRef.current.close();
-          stateChannelRef.current = null;
-          lastRestartAtRef.current = 0;
-        }
+      const now = Date.now();
+      const controlStall = lastControlDataAtRef.current ? now - lastControlDataAtRef.current : 0;
+      // Reliable keyframes already cover a stalled low-latency channel. Restart
+      // ICE only when the reliable channel is silent too; never destroy a live
+      // data channel, because a replacement would need a separate handoff.
+      if (controlStall > 6_000) {
+        setError('连接暂时中断，正在自动重连…');
         void restartConnection();
       }
     }, 1_000);

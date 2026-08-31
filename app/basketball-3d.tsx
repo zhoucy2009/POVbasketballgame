@@ -949,6 +949,9 @@ export default function Basketball3D() {
     const resetGame = (mode: GameMode) => {
       modeRef.current = mode;
       const duration = mode === '1v1' ? 60 : mode === 'practice' ? 0 : 90;
+      remotePlayerState = null; remotePlayerReceivedAt = 0; remotePlayerSequence = -1;
+      latestWorldState = null; latestWorldReceivedAt = 0; latestWorldSequence = -1;
+      peerCommands.length = 0; networkSendAt = 0; reliableKeyframeAt = 0; networkSequence = 0; networkWarningAt = 0;
       gameTime = duration; gameScore = [0, 0]; sprint = 1; cameraYaw = Math.PI / 2; cameraPitch = -0.08; cameraEyeHeight = 1.86;
       resetPositions(0); setScore([0, 0]); setClock(duration); setCharge(0); setDunkCharge(0); setStamina(1);
       showMessage(mode === '1v1' ? '单挑开球！' : mode === 'practice' ? '自由练习·没有对手' : '开球！', 900);
@@ -2759,14 +2762,15 @@ export default function Basketball3D() {
       blockCameraKick = Math.max(0, blockCameraKick - dt);
       contactCameraKick = Math.max(0, contactCameraKick - dt * 0.72);
       if (phaseRef.current === 'playing') {
-        if (modeRef.current !== 'practice') gameTime = Math.max(0, gameTime - dt);
+        const guestWaitingForWorld = onlineSessionRef.current?.role === 'guest' && !latestWorldState;
+        if (modeRef.current !== 'practice' && !guestWaitingForWorld) gameTime = Math.max(0, gameTime - dt);
         dribbleGrace = Math.max(0, dribbleGrace - dt); dashCooldown = Math.max(0, dashCooldown - dt); ankleBreakWindow = Math.max(0, ankleBreakWindow - dt);
         if (delayedDashAt && performance.now() >= delayedDashAt) { delayedDashAt = 0; startDash(); }
         const wasDashing = dashTime > 0;
         dashTime = Math.max(0, dashTime - dt);
         if (wasDashing && dashTime === 0) { dashWithBall = false; spinDirection = 0; dribbleMove = dribbling ? resolveDribbleMove(false) : 'forward'; }
         if (!dribbling && dribbleGrace <= 0 && dashTime <= 0) dribbleMove = 'forward';
-        if (modeRef.current !== 'practice' && gameTime <= 0) { changePhase('over'); document.exitPointerLock?.(); }
+        if (modeRef.current !== 'practice' && !guestWaitingForWorld && gameTime <= 0) { changePhase('over'); document.exitPointerLock?.(); }
         if (resetAt && now >= resetAt) resetPositions(nextPossession);
         if (!resetAt) {
           if (dunking) dunkElapsed += dt;
@@ -2781,7 +2785,9 @@ export default function Basketball3D() {
             else if (shotReleaseDelay <= 0) releaseShot(0, pendingShotPower);
           }
           if (dunkCharging) { dunkPower += dt * 1.12; if (dunkPower > 1) dunkPower = 0.24; }
-          if (onlineSessionRef.current?.role !== 'guest' || !applyPeerWorld(dt, now)) updateBall(dt, now);
+          if (onlineSessionRef.current?.role === 'guest') {
+            if (latestWorldState) applyPeerWorld(dt, now);
+          } else updateBall(dt, now);
           syncPeerState(now);
           if (layingUp && layupElapsed >= LAYUP_DURATION) {
             layingUp = false;
