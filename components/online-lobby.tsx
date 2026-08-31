@@ -37,7 +37,8 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
   const processedSignalsRef = useRef(new Set<number>());
   const queuedIceRef = useRef<RTCIceCandidateInit[]>([]);
   const handedOffRef = useRef(false);
-  const lastPeerDataAtRef = useRef(0);
+  const lastControlDataAtRef = useRef(0);
+  const lastStateDataAtRef = useRef(0);
   const lastRestartAtRef = useRef(0);
   const restartTimerRef = useRef<number | undefined>(undefined);
 
@@ -55,12 +56,20 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
   }, []);
 
   const bindChannel = useCallback((channel: RTCDataChannel) => {
-    if (channel.label === 'unmatched-state') stateChannelRef.current = channel;
+    const isStateChannel = channel.label.startsWith('unmatched-state');
+    if (isStateChannel) stateChannelRef.current = channel;
     else channelRef.current = channel;
-    channel.onopen = () => { lastPeerDataAtRef.current = Date.now(); updateChannelReady(); };
+    channel.onopen = () => {
+      if (isStateChannel) lastStateDataAtRef.current = Date.now();
+      else lastControlDataAtRef.current = Date.now();
+      updateChannelReady();
+    };
     channel.onclose = () => { updateChannelReady(); setError('对手连接中断，正在重连…'); };
     channel.onerror = () => setError('网络波动，正在恢复连接…');
-    channel.addEventListener('message', () => { lastPeerDataAtRef.current = Date.now(); });
+    channel.addEventListener('message', () => {
+      if (isStateChannel) lastStateDataAtRef.current = Date.now();
+      else lastControlDataAtRef.current = Date.now();
+    });
     updateChannelReady();
   }, [updateChannelReady]);
 
@@ -72,6 +81,8 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
     lastRestartAtRef.current = Date.now();
     try {
       if (room.hostId === meId) {
+        if (!channelRef.current || channelRef.current.readyState === 'closed') bindChannel(pc.createDataChannel('unmatched-control', { ordered: true }));
+        if (!stateChannelRef.current || stateChannelRef.current.readyState === 'closed') bindChannel(pc.createDataChannel('unmatched-state', { ordered: false, maxPacketLifeTime: 180 }));
         pc.restartIce();
         const offer = await pc.createOffer({ iceRestart: true });
         await pc.setLocalDescription(offer);
@@ -82,7 +93,7 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
     } catch {
       setError('正在重试对局连接…');
     }
-  }, [sendSignal]);
+  }, [bindChannel, sendSignal]);
 
   const setupPeer = useCallback(async (room: OnlineRoom, meId: string) => {
     if (pcRef.current) return;
@@ -95,7 +106,7 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
     pc.onicecandidate = (event) => { if (event.candidate) void sendSignal('ice', event.candidate.toJSON()); };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'connected') {
-        lastPeerDataAtRef.current = Date.now();
+        lastControlDataAtRef.current = Date.now();
         setError('');
         if (restartTimerRef.current) window.clearTimeout(restartTimerRef.current);
       } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
@@ -108,7 +119,7 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
     };
     if (room.hostId === meId) {
       bindChannel(pc.createDataChannel('unmatched-control', { ordered: true }));
-      bindChannel(pc.createDataChannel('unmatched-state', { ordered: false, maxRetransmits: 0 }));
+      bindChannel(pc.createDataChannel('unmatched-state', { ordered: false, maxPacketLifeTime: 180 }));
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       await sendSignal('offer', offer);
@@ -199,10 +210,16 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
     const poll = window.setInterval(() => { void refresh(); }, 650);
     const peerHeartbeat = window.setInterval(() => {
       const control = channelRef.current;
-      if (!handedOffRef.current || control?.readyState !== 'open') return;
-      control.send(JSON.stringify({ type: 'heartbeat', at: Date.now() }));
-      if (lastPeerDataAtRef.current && Date.now() - lastPeerDataAtRef.current > 2_800) {
-        setError('对手数据暂停，正在自动恢复…');
+      if (!handedOffRef.current) return;
+      if (control?.readyState === 'open') control.send(JSON.stringify({ type: 'heartbeat', at: Date.now() }));
+      const stateStall = lastStateDataAtRef.current ? Date.now() - lastStateDataAtRef.current : 0;
+      if (stateStall > 1_600) {
+        setError('对手位置数据暂停，正在自动恢复…');
+        if (stateStall > 3_200 && roomRef.current?.hostId === meIdRef.current && stateChannelRef.current?.readyState === 'open') {
+          stateChannelRef.current.close();
+          stateChannelRef.current = null;
+          lastRestartAtRef.current = 0;
+        }
         void restartConnection();
       }
     }, 1_000);

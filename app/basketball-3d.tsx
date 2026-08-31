@@ -784,6 +784,7 @@ export default function Basketball3D() {
     let latestWorldSequence = -1;
     const peerCommands: PeerCommand[] = [];
     let networkSendAt = 0;
+    let reliableKeyframeAt = 0;
     let networkSequence = 0;
     let networkWarningAt = 0;
 
@@ -794,7 +795,17 @@ export default function Basketball3D() {
 
     const sendState = (payload: unknown) => {
       const channel = onlineSessionRef.current?.stateChannel;
-      if (channel?.readyState === 'open' && channel.bufferedAmount < 65_536) channel.send(JSON.stringify(payload));
+      if (channel?.readyState === 'open' && channel.bufferedAmount < 16_384) channel.send(JSON.stringify(payload));
+    };
+
+    const acceptPlayerState = (state: PeerPlayerState | undefined, receivedAt: number) => {
+      if (!state || state.seq <= remotePlayerSequence) return;
+      remotePlayerState = state; remotePlayerSequence = state.seq; remotePlayerReceivedAt = receivedAt;
+    };
+
+    const acceptWorldState = (state: WorldState | undefined, receivedAt: number) => {
+      if (!state || state.seq <= latestWorldSequence) return;
+      latestWorldState = state; latestWorldSequence = state.seq; latestWorldReceivedAt = receivedAt;
     };
 
     const bindPeerChannel = () => {
@@ -803,8 +814,13 @@ export default function Basketball3D() {
         boundPeerChannel = channel;
         channel.addEventListener('message', (event) => {
           try {
-            const message = JSON.parse(String(event.data)) as { type: string; command?: PeerCommand };
+            const message = JSON.parse(String(event.data)) as { type: string; command?: PeerCommand; player?: PeerPlayerState; world?: WorldState };
             if (message.type === 'command' && message.command) peerCommands.push(message.command);
+            if (message.type === 'keyframe') {
+              const receivedAt = performance.now() / 1000;
+              acceptPlayerState(message.player, receivedAt);
+              acceptWorldState(message.world, receivedAt);
+            }
           } catch { /* Ignore malformed peer packets. */ }
         });
       }
@@ -815,12 +831,8 @@ export default function Basketball3D() {
           try {
             const message = JSON.parse(String(event.data)) as { type: string; player?: PeerPlayerState; world?: WorldState };
             const receivedAt = performance.now() / 1000;
-            if (message.type === 'player' && message.player && message.player.seq > remotePlayerSequence) {
-              remotePlayerState = message.player; remotePlayerSequence = message.player.seq; remotePlayerReceivedAt = receivedAt;
-            }
-            if (message.type === 'world' && message.world && message.world.seq > latestWorldSequence) {
-              latestWorldState = message.world; latestWorldSequence = message.world.seq; latestWorldReceivedAt = receivedAt;
-            }
+            if (message.type === 'player') acceptPlayerState(message.player, receivedAt);
+            if (message.type === 'world') acceptWorldState(message.world, receivedAt);
           } catch { /* Ignore malformed peer packets. */ }
         });
       }
@@ -838,6 +850,11 @@ export default function Basketball3D() {
       blockFeedbackTimer = window.setTimeout(() => setBlockImpact(false), 760);
     };
     const hoop = (team: Team) => new THREE.Vector3(team === 0 ? HOOP_X : -HOOP_X, 3.05, 0);
+    const facingFromDirection = (direction: THREE.Vector3) => Math.atan2(direction.x, direction.z);
+    const facePoint = (player: Athlete, target: THREE.Vector3) => {
+      const direction = target.clone().sub(player.position).setY(0);
+      if (direction.lengthSq() > 0.001) player.facing = facingFromDirection(direction);
+    };
     const oppositeHand = (hand: DribbleHand): DribbleHand => hand === 'right' ? 'left' : 'right';
     const getHandPosition = (player: Athlete, hand: DribbleHand) => {
       player.group.updateMatrixWorld(true);
@@ -970,7 +987,7 @@ export default function Basketball3D() {
       me.jumpV = Math.max(me.jumpV, 6.9);
       me.action = LAYUP_DURATION;
       me.actionKind = 'layup';
-      me.facing = Math.atan2(toRim.x, toRim.z);
+      me.facing = facingFromDirection(toRim);
       dribbling = false; dribbleGrace = 0; dashTime = 0; dashWithBall = false; spinDirection = 0;
       showMessage('跑动上篮！转动视角可触发拉杆', 900);
       return true;
@@ -1058,6 +1075,7 @@ export default function Basketball3D() {
       player.actionKind = 'shoot';
       ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = 1.02 + Math.abs(player.position.x) * 0.014; ball.scored = false;
       const target = hoop(player.team);
+      if (owner !== 0) facePoint(player, target);
       const distance = player.position.distanceTo(new THREE.Vector3(target.x, 0, target.z));
       const ideal = clamp(0.54 + distance * 0.012, 0.58, 0.82);
       const coneRead = readShotCone(owner);
@@ -1120,7 +1138,7 @@ export default function Basketball3D() {
       const me = athletes[0];
       const target = hoop(me.team);
       const rimDirection = Math.sign(target.x - me.position.x) || 1;
-      me.facing = rimDirection > 0 ? Math.PI / 2 : -Math.PI / 2;
+      facePoint(me, target);
       me.jumpV = Math.max(me.jumpV, 7.7 + dunkPower * 0.85);
       me.action = 1.55; me.actionKind = 'dunk';
       dunking = true; dunkElapsed = 0; dunkWasPerfect = dunkPower > 0.58 && dunkPower < 0.86; dunkResolved = false;
@@ -1138,6 +1156,7 @@ export default function Basketball3D() {
       if (ball.owner !== owner || owner === target || athletes[owner].team !== athletes[target].team) return false;
       const passer = athletes[owner];
       passer.action = 0.46; passer.actionKind = 'pass';
+      facePoint(passer, athletes[target].position);
       ball.owner = null; ball.mode = 'pass'; ball.passTarget = target; ball.lastOwner = owner; ball.scored = false; ball.shotAge = 0;
       ball.position.copy(getGatherPosition(passer));
       const catchPoint = athletes[target].position.clone().addScaledVector(athletes[target].velocity, 0.16).add(new THREE.Vector3(0, 1.3, 0));
@@ -1362,13 +1381,14 @@ export default function Basketball3D() {
     canvas.addEventListener('mousedown', onMouseDown);
     canvas.addEventListener('contextmenu', onContext);
 
-    const moveToward = (player: Athlete, target: THREE.Vector3, speed: number, dt: number) => {
+    const moveToward = (player: Athlete, target: THREE.Vector3, speed: number, dt: number, facingTarget?: THREE.Vector3) => {
       const delta = target.clone().sub(player.position); delta.y = 0;
       const distance = delta.length();
       if (distance > 0.04) {
         delta.normalize(); player.position.addScaledVector(delta, Math.min(distance, speed * dt)); player.velocity.copy(delta).multiplyScalar(speed);
-        player.facing = Math.atan2(delta.x, delta.z);
+        player.facing = facingFromDirection(delta);
       } else player.velocity.multiplyScalar(0.75);
+      if (facingTarget) facePoint(player, facingTarget);
     };
 
     const scoreBasket = (team: Team, points: number, now: number) => {
@@ -1527,7 +1547,7 @@ export default function Basketball3D() {
       player.jumpV = Math.max(player.jumpV, 6.25);
       player.action = 1.08;
       player.actionKind = acrobatic ? 'acrobatic-layup' : 'layup';
-      player.facing = rim.x > player.position.x ? Math.PI / 2 : -Math.PI / 2;
+      facePoint(player, rim);
       ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = 0.7; ball.shotPoints = 2; ball.scored = false;
       const coneRead = readShotCone(owner, 2.75, Math.PI * 0.24);
       const openBonus = coneRead.defendersInCone === 0 ? 0.09 + (acrobatic ? 0.06 : 0) : 0;
@@ -1555,7 +1575,7 @@ export default function Basketball3D() {
       player.jumpV = Math.max(player.jumpV, putback ? 7.9 : 7.45);
       player.action = putback ? 1.28 : 1.18;
       player.actionKind = 'dunk';
-      player.facing = rim.x > player.position.x ? Math.PI / 2 : -Math.PI / 2;
+      facePoint(player, rim);
       ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = putback ? 0.4 : 0.5; ball.shotPoints = 2; ball.scored = false;
       const contactPenalty = contactPressure[owner] * 0.18;
       const chance = clamp((putback ? 0.68 : 0.91) + (coneRead.defendersInCone === 0 ? 0.05 : 0) - coneRead.contestStrength * (putback ? 0.5 : 0.62) - contactPenalty, 0.01, 0.98);
@@ -2102,7 +2122,7 @@ export default function Basketball3D() {
         const eased = progress * progress * (3 - 2 * progress);
         me.position.lerpVectors(dunkStartPosition, dunkFinishPosition, eased);
         me.velocity.copy(dunkFinishPosition).sub(dunkStartPosition).normalize().multiplyScalar(7.8);
-        me.facing = dunkFinishPosition.x > dunkStartPosition.x ? Math.PI / 2 : -Math.PI / 2;
+        facePoint(me, hoop(me.team));
       }
       me.position.x = clamp(me.position.x, -COURT_HALF_X + COURT_INSET, COURT_HALF_X - COURT_INSET);
       me.position.z = clamp(me.position.z, -COURT_HALF_Z + COURT_INSET, COURT_HALF_Z - COURT_INSET);
@@ -2148,6 +2168,7 @@ export default function Basketball3D() {
           const plannedShot = aiShotPlans[index];
           if (plannedShot) {
             player.velocity.multiplyScalar(0.18);
+            facePoint(player, rim);
             player.action = Math.max(player.action, 0.38);
             player.actionKind = 'shoot';
             if (now >= plannedShot.releaseAt) {
@@ -2229,7 +2250,7 @@ export default function Basketball3D() {
             driveTarget = new THREE.Vector3(attack * (distanceToRim > 8 ? 13.2 : 16.35), 0, laneZ);
           }
           const burstSpeed = player.moveUntil > now ? 1.28 : underPressure ? 0.94 : tactic?.phase === 'setup' ? 0.72 : 1.04;
-          moveToward(player, driveTarget, PLAYER_RUN_SPEED * burstSpeed, dt);
+          moveToward(player, driveTarget, PLAYER_RUN_SPEED * burstSpeed, dt, rim);
         } else if (possession === player.team) {
           if (ball.mode === 'pass' && ball.passTarget === index) {
             moveToward(player, new THREE.Vector3(ball.position.x, 0, ball.position.z), PLAYER_RUN_SPEED * 1.08, dt);
@@ -2259,7 +2280,8 @@ export default function Basketball3D() {
             } else {
               target = new THREE.Vector3(attack * 12.4, 0, index % 2 ? -5.8 : 5.8);
             }
-            moveToward(player, target, PLAYER_RUN_SPEED * tacticalSpeed, dt);
+            const shouldTrackBall = tacticalSpeed <= 1.05;
+            moveToward(player, target, PLAYER_RUN_SPEED * tacticalSpeed, dt, shouldTrackBall ? owner.position : undefined);
           }
         } else if (possession !== null) {
           const markIndex = defensiveMaps[player.team].get(index);
@@ -2278,7 +2300,7 @@ export default function Basketball3D() {
           const offenseTactic = teamTactics[mark.team];
           const hittingScreen = onBall && offenseTactic?.phase === 'screen'
             && horizontalDistance(player.position, athletes[offenseTactic.screener].position) < 1.02;
-          moveToward(player, target, PLAYER_RUN_SPEED * (hittingScreen ? 0.66 : onBall ? 1.08 : 0.98), dt);
+          moveToward(player, target, PLAYER_RUN_SPEED * (hittingScreen ? 0.66 : onBall ? 1.08 : 0.98), dt, mark.position);
           const reachDistance = horizontalDistance(player.position, mark.position);
           const shootingThreat = ball.owner === markIndex
             && ((mark.actionKind === 'shoot' || mark.actionKind === 'layup' || mark.actionKind === 'acrobatic-layup') && mark.action > 0.15
@@ -2664,20 +2686,20 @@ export default function Basketball3D() {
       networkSendAt = now;
       const seq = ++networkSequence;
       const me = athletes[0];
-      sendState({
-        type: 'player',
-        player: { seq, x: me.position.x, z: me.position.z, vx: me.velocity.x, vz: me.velocity.z, facing: me.facing, jump: me.jump, action: me.action, actionKind: me.actionKind, moveKind: dribbleMove } satisfies PeerPlayerState,
-      });
+      const playerState = { seq, x: me.position.x, z: me.position.z, vx: me.velocity.x, vz: me.velocity.z, facing: me.facing, jump: me.jump, action: me.action, actionKind: me.actionKind, moveKind: dribbleMove } satisfies PeerPlayerState;
+      const worldState = session.role === 'host' ? {
+        seq,
+        ball: { x: ball.position.x, y: ball.position.y, z: ball.position.z, vx: ball.velocity.x, vy: ball.velocity.y, vz: ball.velocity.z, owner: ball.owner, mode: ball.mode },
+        score: gameScore,
+        time: gameTime,
+      } satisfies WorldState : undefined;
+      sendState({ type: 'player', player: playerState });
       if (session.role === 'host') {
-        sendState({
-          type: 'world',
-          world: {
-            seq,
-            ball: { x: ball.position.x, y: ball.position.y, z: ball.position.z, vx: ball.velocity.x, vy: ball.velocity.y, vz: ball.velocity.z, owner: ball.owner, mode: ball.mode },
-            score: gameScore,
-            time: gameTime,
-          } satisfies WorldState,
-        });
+        sendState({ type: 'world', world: worldState });
+      }
+      if (now - reliableKeyframeAt >= 0.2) {
+        reliableKeyframeAt = now;
+        sendPeer({ type: 'keyframe', player: playerState, world: worldState });
       }
     };
 
