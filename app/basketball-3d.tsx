@@ -30,6 +30,7 @@ type Athlete = {
   rightHand?: THREE.Object3D;
   feet?: [THREE.Object3D, THREE.Object3D];
   hips?: THREE.Object3D;
+  head?: THREE.Object3D;
   rig?: THREE.Group;
   visual?: THREE.Group;
 };
@@ -452,7 +453,10 @@ export default function Basketball3D() {
         makeViewClip(mixamoRun, 'Mixamo_Run'),
       ];
 
-      const athleteHeights = [2.06, 2.1, 2.13, 2.11, 2.15, 2.09];
+      // The controlled guard is 1.98 m; the remaining front-court players are
+      // progressively taller. The camera reads the guard's actual head bone,
+      // so opponents now sit above the player's eye line for the right reason.
+      const athleteHeights = [1.98, 2.06, 2.1, 2.08, 2.14, 2.06];
       athletes.forEach((player, index) => {
         const model = cloneSkeleton(character) as THREE.Group;
         model.name = 'rigModel';
@@ -516,6 +520,7 @@ export default function Basketball3D() {
         player.rightHand = primarySkeleton?.getBoneByName('HandR') ?? undefined;
         player.hand = player.rightHand;
         player.hips = primarySkeleton?.getBoneByName('Hips') ?? undefined;
+        player.head = primarySkeleton?.getBoneByName('Head') ?? undefined;
         const leftFoot = primarySkeleton?.getBoneByName('FootL');
         const rightFoot = primarySkeleton?.getBoneByName('FootR');
         if (leftFoot && rightFoot) player.feet = [leftFoot, rightFoot];
@@ -606,6 +611,7 @@ export default function Basketball3D() {
     const keys: Record<string, boolean> = {};
     let cameraYaw = Math.PI / 2;
     let cameraPitch = -0.08;
+    let cameraEyeHeight = 1.86;
     let charging = false;
     let shotCharge = 0;
     let shotStyle: ShotStyle = 'normal';
@@ -653,6 +659,8 @@ export default function Basketball3D() {
     let nextPossession: Team = 0;
     let resetAt = 0;
     let aiShotCooldown = 1.5;
+    const aiDecisionCooldown = Array.from({ length: athletes.length }, () => 0);
+    const aiPassCooldown = Array.from({ length: athletes.length }, () => 0);
     let uiAt = 0;
     let last = performance.now() / 1000;
     let dragLooking = false;
@@ -692,6 +700,7 @@ export default function Basketball3D() {
     const resetPositions = (team: Team = 0) => {
       athletes.forEach((player, index) => {
         player.position.copy(starts[index]); player.velocity.set(0, 0, 0); player.jump = 0; player.jumpV = 0; player.action = 0; player.actionKind = 'idle'; player.stealCooldown = 0.55 + index * 0.14; player.stumbleSide = index % 2 ? -1 : 1;
+        aiDecisionCooldown[index] = 0.2 + index * 0.08; aiPassCooldown[index] = 0;
       });
       const owner = team === 0 ? 0 : 3;
       ball.owner = owner; ball.lastOwner = owner; ball.mode = 'held'; ball.passTarget = null; ball.scored = false; ball.velocity.set(0, 0, 0);
@@ -699,7 +708,7 @@ export default function Basketball3D() {
     };
 
     const resetGame = () => {
-      gameTime = 90; gameScore = [0, 0]; sprint = 1; cameraYaw = Math.PI / 2; cameraPitch = -0.08;
+      gameTime = 90; gameScore = [0, 0]; sprint = 1; cameraYaw = Math.PI / 2; cameraPitch = -0.08; cameraEyeHeight = 1.86;
       resetPositions(0); setScore([0, 0]); setClock(90); setCharge(0); setDunkCharge(0); setStamina(1); showMessage('开球！', 800);
     };
 
@@ -830,8 +839,23 @@ export default function Basketball3D() {
       dunkPower = 0; setDunkCharge(0);
     };
 
+    const sendPass = (owner: number, target: number, label = '传球') => {
+      if (ball.owner !== owner || owner === target || athletes[owner].team !== athletes[target].team) return false;
+      const passer = athletes[owner];
+      passer.action = 0.46; passer.actionKind = 'pass';
+      ball.owner = null; ball.mode = 'pass'; ball.passTarget = target; ball.lastOwner = owner; ball.scored = false;
+      ball.position.copy(getGatherPosition(passer));
+      const catchPoint = athletes[target].position.clone().addScaledVector(athletes[target].velocity, 0.16).add(new THREE.Vector3(0, 1.3, 0));
+      const distance = catchPoint.distanceTo(ball.position);
+      ball.velocity.copy(catchPoint.sub(ball.position).normalize().multiplyScalar(clamp(11.8 + distance * 0.18, 11.8, 15.2)));
+      aiPassCooldown[owner] = 1.15;
+      aiDecisionCooldown[target] = 0.38;
+      showMessage(label, 650);
+      return true;
+    };
+
     const passBall = () => {
-      if (ball.owner !== 0 || dunking || shotPending) return;
+      if (ball.owner !== 0 || dunking || shotPending) return false;
       const me = athletes[0];
       const forward = new THREE.Vector3(Math.sin(cameraYaw), 0, -Math.cos(cameraYaw));
       const mates = [1, 2].sort((a, b) => {
@@ -840,11 +864,23 @@ export default function Basketball3D() {
         return db - da;
       });
       const target = mates[0];
-      me.action = 0.42; me.actionKind = 'pass';
-      ball.owner = null; ball.mode = 'pass'; ball.passTarget = target; ball.lastOwner = 0;
-      ball.position.copy(me.position).add(new THREE.Vector3(0, 1.55 + me.jump, 0));
-      ball.velocity.copy(athletes[target].position.clone().add(new THREE.Vector3(0, 1.25, 0)).sub(ball.position).normalize().multiplyScalar(12.5));
-      showMessage('传球');
+      return sendPass(0, target, '传球');
+    };
+
+    const passOrCallForBall = () => {
+      if (ball.owner === 0) { passBall(); return; }
+      if (ball.owner !== null && athletes[ball.owner].team === 0) {
+        const owner = ball.owner;
+        const nearestDefender = athletes.reduce((nearest, defender) => {
+          if (defender.team === 0) return nearest;
+          return Math.min(nearest, defender.position.distanceTo(athletes[0].position));
+        }, Infinity);
+        const distance = athletes[owner].position.distanceTo(athletes[0].position);
+        if (distance > 14.5) { showMessage('距离太远，先靠近队友', 750); return; }
+        sendPass(owner, 0, nearestDefender > 1.15 ? '队友回应要球！' : '有防守，注意接球！');
+        return;
+      }
+      showMessage(ball.owner === null ? '先争抢球权' : '防守回合无法要球', 650);
     };
 
     const steal = () => {
@@ -924,7 +960,7 @@ export default function Basketball3D() {
         queuedShotStyle = comboDirection === 's' ? 'fade' : comboDirection === 'a' ? 'step-left' : comboDirection === 'd' ? 'step-right' : 'normal';
         queuedShotUntil = queuedShotStyle === 'normal' ? 0 : performance.now() + 520;
       }
-      if (key === 'f') passBall();
+      if (key === 'f') passOrCallForBall();
       if (key === 'shift') steal();
       if (key === 'space') {
         // A short input buffer lets A/D/S + Space + LMB resolve as a shot
@@ -1004,6 +1040,48 @@ export default function Basketball3D() {
       gameScore[team] += points; setScore([...gameScore] as [number, number]);
       nextPossession = team === 0 ? 1 : 0; resetAt = now + 1.35;
       showMessage(points === 3 ? '三分命中！' : '进球！', 1050);
+    };
+
+    const nearestDefenderDistance = (playerIndex: number) => athletes.reduce((nearest, defender, defenderIndex) => {
+      if (defenderIndex === playerIndex || defender.team === athletes[playerIndex].team) return nearest;
+      return Math.min(nearest, defender.position.distanceTo(athletes[playerIndex].position));
+    }, Infinity);
+
+    const bestAiPassTarget = (owner: number) => {
+      const passer = athletes[owner];
+      const attack = passer.team === 0 ? 1 : -1;
+      return athletes.reduce<{ index: number; score: number }>((best, mate, index) => {
+        if (index === owner || mate.team !== passer.team) return best;
+        const openness = nearestDefenderDistance(index);
+        const advance = (mate.position.x - passer.position.x) * attack;
+        const passDistance = mate.position.distanceTo(passer.position);
+        const score = openness * 1.35 + advance * 0.16 - Math.max(0, passDistance - 9) * 0.12 + (index === 0 ? 0.18 : 0);
+        return score > best.score ? { index, score } : best;
+      }, { index: -1, score: -Infinity });
+    };
+
+    const startAiDunk = (owner: number, putback = false) => {
+      const player = athletes[owner];
+      if (owner === 0 || (putback ? ball.owner !== null : ball.owner !== owner)) return false;
+      const rim = hoop(player.team);
+      const rimGround = rim.clone().setY(0);
+      if (player.position.distanceTo(rimGround) > (putback ? 2.8 : 2.45)) return false;
+      const contest = nearestDefenderDistance(owner);
+      player.jumpV = Math.max(player.jumpV, putback ? 7.9 : 7.45);
+      player.action = putback ? 1.28 : 1.18;
+      player.actionKind = 'dunk';
+      player.facing = rim.x > player.position.x ? Math.PI / 2 : -Math.PI / 2;
+      ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = putback ? 0.4 : 0.5; ball.shotPoints = 2; ball.scored = false;
+      ball.shotMake = Math.random() < clamp((putback ? 0.78 : 0.9) - (contest < 1.15 ? (1.15 - contest) * 0.24 : 0), 0.48, 0.94);
+      const from = getHandPosition(player, 'right');
+      ball.position.copy(from);
+      const t = ball.shotFlight;
+      const aim = rim.clone();
+      if (!ball.shotMake) aim.z += (Math.random() > 0.5 ? 1 : -1) * 0.82;
+      ball.velocity.set((aim.x - from.x) / t, (aim.y - from.y + 4.9 * t * t) / t, (aim.z - from.z) / t);
+      aiDecisionCooldown[owner] = 1.25;
+      showMessage(putback ? '机器人补扣！' : '机器人起飞扣篮！', 850);
+      return true;
     };
 
     const keepBallOnCourt = () => {
@@ -1160,8 +1238,9 @@ export default function Basketball3D() {
           if (ball.position.distanceTo(target.position.clone().add(new THREE.Vector3(0, 1.1, 0))) < 1.05) {
             ball.owner = ball.passTarget; ball.lastOwner = ball.passTarget; ball.mode = 'held'; ball.passTarget = null;
           } else {
+            const passingTeam = athletes[ball.lastOwner].team;
             athletes.forEach((player, index) => {
-              if (player.team === 1 && player.position.distanceTo(ball.position) < 0.8 && Math.random() < dt * 3) {
+              if (ball.mode === 'pass' && player.team !== passingTeam && player.position.distanceTo(ball.position) < 0.8 && Math.random() < dt * 3) {
                 ball.owner = index; ball.lastOwner = index; ball.mode = 'held'; ball.passTarget = null; showMessage('传球被断');
               }
             });
@@ -1202,7 +1281,14 @@ export default function Basketball3D() {
             const horizontal = player.position.distanceTo(new THREE.Vector3(ball.position.x, 0, ball.position.z));
             if (horizontal < reach && ball.position.y < 1.35 + player.jump && horizontal < nearestDistance) { nearest = index; nearestDistance = horizontal; }
           });
-          if (nearest >= 0) { ball.owner = nearest; ball.lastOwner = nearest; ball.mode = 'held'; showMessage(nearest === 0 ? '抢到篮板！' : '篮板'); }
+          if (nearest >= 0) {
+            const rebounder = athletes[nearest];
+            const nearOwnRim = rebounder.position.distanceTo(hoop(rebounder.team).setY(0)) < 2.8;
+            const canPutback = nearest !== 0 && nearOwnRim && ball.position.y > 1.45 && rebounder.jump > 0.12 && Math.random() < 0.58;
+            if (!canPutback || !startAiDunk(nearest, true)) {
+              ball.owner = nearest; ball.lastOwner = nearest; ball.mode = 'held'; showMessage(nearest === 0 ? '抢到篮板！' : '篮板');
+            }
+          }
         }
       }
       if (dunking && !dunkHasBall && dunkElapsed >= 1.12) {
@@ -1262,9 +1348,11 @@ export default function Basketball3D() {
       me.position.x = clamp(me.position.x, -COURT_HALF_X + COURT_INSET, COURT_HALF_X - COURT_INSET);
       me.position.z = clamp(me.position.z, -COURT_HALF_Z + COURT_INSET, COURT_HALF_Z - COURT_INSET);
 
-      const possession = ball.owner === null ? null : athletes[ball.owner].team;
+      const possession = ball.owner === null ? (ball.mode === 'pass' ? athletes[ball.lastOwner].team : null) : athletes[ball.owner].team;
       athletes.forEach((player, index) => {
         player.stealCooldown = Math.max(0, player.stealCooldown - dt);
+        aiDecisionCooldown[index] = Math.max(0, aiDecisionCooldown[index] - dt);
+        aiPassCooldown[index] = Math.max(0, aiPassCooldown[index] - dt);
         if (index === 0) return;
         if (player.action > 0 && player.actionKind === 'stumble') {
           const away = player.position.clone().sub(me.position); away.y = 0;
@@ -1275,14 +1363,52 @@ export default function Basketball3D() {
         if (player.action > 0 && player.actionKind === 'steal') { player.velocity.multiplyScalar(0.64); return; }
         const attack = player.team === 0 ? 1 : -1;
         if (ball.owner === index) {
-          const target = new THREE.Vector3(attack * 16.1, 0, (index % 2 ? -1 : 1) * 1.5);
-          moveToward(player, target, PLAYER_RUN_SPEED, dt);
-          if (player.position.distanceTo(hoop(player.team).setY(0)) < 5.4 && aiShotCooldown <= 0) {
-            releaseShot(index, 0.68 + Math.random() * 0.13); aiShotCooldown = 1.9;
+          const rim = hoop(player.team).setY(0);
+          const distanceToRim = player.position.distanceTo(rim);
+          const defenderDistance = nearestDefenderDistance(index);
+          if (aiDecisionCooldown[index] <= 0) {
+            aiDecisionCooldown[index] = 0.34 + Math.random() * 0.28;
+            const bestPass = bestAiPassTarget(index);
+            const bestPassOpen = bestPass.index >= 0 ? nearestDefenderDistance(bestPass.index) : 0;
+            const underPressure = defenderDistance < 1.35;
+            const shouldMoveBall = aiPassCooldown[index] <= 0 && bestPass.index >= 0
+              && bestPassOpen > defenderDistance + 0.38
+              && (underPressure || distanceToRim > 7.2 && Math.random() < 0.42);
+            if (shouldMoveBall && sendPass(index, bestPass.index, player.team === 0 ? '队友转移球！' : '机器人配合传球')) return;
+
+            if (distanceToRim < 2.45 && aiShotCooldown <= 0 && Math.random() < 0.78) {
+              if (startAiDunk(index)) { aiShotCooldown = 1.25; return; }
+            }
+
+            const openShot = defenderDistance > 1.25;
+            const threePointTry = distanceToRim >= 7 && distanceToRim < 10.2 && (openShot ? Math.random() < 0.76 : Math.random() < 0.2);
+            const midRangeTry = distanceToRim >= 3.6 && distanceToRim < 7 && (openShot ? Math.random() < 0.62 : Math.random() < 0.18);
+            const layupTry = distanceToRim >= 2.35 && distanceToRim < 3.9 && Math.random() < (openShot ? 0.72 : 0.36);
+            if (aiShotCooldown <= 0 && (threePointTry || midRangeTry || layupTry)) {
+              const idealPower = clamp(0.54 + distanceToRim * 0.012 + (Math.random() - 0.5) * 0.055, 0.58, 0.82);
+              showMessage(threePointTry ? '机器人三分出手！' : midRangeTry ? '机器人急停跳投！' : '机器人突破上篮！', 760);
+              releaseShot(index, idealPower);
+              aiShotCooldown = threePointTry ? 1.65 : 1.35;
+              return;
+            }
           }
+          const laneZ = (index % 2 ? -1 : 1) * (defenderDistance < 1.2 ? 2.8 : 1.25);
+          const driveX = attack * (distanceToRim > 8 ? 13.2 : 16.35);
+          moveToward(player, new THREE.Vector3(driveX, 0, laneZ), PLAYER_RUN_SPEED * (defenderDistance < 1.1 ? 0.94 : 1.04), dt);
         } else if (possession === player.team) {
-          const lanes = player.team === 0 ? [[10.8, -5.7], [12.2, 5.5], [9.3, 0]] : [[-10.8, -5.7], [-12.2, 5.5], [-9.3, 0]];
-          const lane = lanes[index % 3]; moveToward(player, new THREE.Vector3(lane[0], 0, lane[1]), PLAYER_RUN_SPEED, dt);
+          if (ball.mode === 'pass' && ball.passTarget === index) {
+            moveToward(player, new THREE.Vector3(ball.position.x, 0, ball.position.z), PLAYER_RUN_SPEED * 1.08, dt);
+          } else {
+            const role = index % 3;
+            const ownerIndex = ball.owner ?? ball.lastOwner;
+            const owner = athletes[ownerIndex];
+            const ownerDistanceToRim = owner.position.distanceTo(hoop(owner.team).setY(0));
+            const cutting = role === 2 && ownerDistanceToRim > 6.2;
+            const target = cutting
+              ? new THREE.Vector3(attack * 15.9, 0, (index % 2 ? -1 : 1) * 1.35)
+              : new THREE.Vector3(attack * (role === 0 ? 10.2 : 12.1), 0, role === 0 ? -5.8 : 5.6);
+            moveToward(player, target, PLAYER_RUN_SPEED * (cutting ? 1.08 : 0.96), dt);
+          }
         } else if (possession !== null) {
           const markIndex = player.team === 0 ? index + 3 : index - 3;
           const mark = athletes[markIndex];
@@ -1546,11 +1672,16 @@ export default function Basketball3D() {
       const bob = stride * 0.018;
       const lateralSway = moving ? Math.cos(armClock * 5.75) * 0.014 : 0;
       const right = new THREE.Vector3(-forward.z, 0, forward.x);
-      // Sit the camera just in front of the face and slightly below eye level.
-      // This keeps the mocap-driven shoulders, arms and upper legs in frame while
-      // avoiding the back of the character's head clipping into the view.
+      // Derive the view height from the same animated head bone used by every
+      // world athlete. This keeps the player's eye line anatomically consistent
+      // with opponents instead of imposing a fixed, mismatched camera height.
+      if (me.head) {
+        const animatedHead = me.head.getWorldPosition(new THREE.Vector3());
+        const standingEye = clamp(animatedHead.y - me.jump + 0.075, 1.68, 1.92);
+        cameraEyeHeight += (standingEye - cameraEyeHeight) * 0.16;
+      }
       const eye = me.position.clone().addScaledVector(forward, 0.21).addScaledVector(right, lateralSway);
-      eye.y = 1.64 + me.jump + bob;
+      eye.y = cameraEyeHeight + me.jump + bob;
       camera.position.copy(eye);
       const lookDirection = forward.multiplyScalar(Math.cos(cameraPitch));
       lookDirection.y = Math.sin(cameraPitch);
@@ -1658,7 +1789,7 @@ export default function Basketball3D() {
         <div className="crosshair3d" aria-hidden="true"><i/><i/></div>
         <div className="room3d"><span>Room code: <b>1844</b></span><span>Region: asia</span><span>Type: local</span><em>⌁ Ping: 18</em></div>
         <div className="chat3d"><button className="exit3d" onClick={()=>changePhase('paused')}>Exit <kbd>P</kbd></button><div><button onClick={()=>setMessage('PASS!')}>PASS <kbd>1</kbd></button><button onClick={()=>setMessage('NICE!')}>NICE <kbd>2</kbd></button><button onClick={()=>setMessage('SORRY!')}>SORRY <kbd>3</kbd></button><span>CHAT</span></div></div>
-        <div className="guide3d"><span>Jump / Block <kbd>LMB</kbd></span><span>Steal <kbd>Shift</kbd></span><span>Pass <kbd>F</kbd></span><span>Dash <kbd>Space</kbd></span><span>Dribble + Move <kbd>RMB</kbd></span><span>Burst Combo <kbd>RMB + Space</kbd></span><span>Side-step Shot <kbd>A/D + Space + LMB</kbd></span><span>Fadeaway <kbd>S + Space + LMB</kbd></span><span>Shoot <kbd>LMB</kbd></span><span>Dunk / Putback <kbd>Tab</kbd></span></div>
+        <div className="guide3d"><span>Jump / Block <kbd>LMB</kbd></span><span>Steal <kbd>Shift</kbd></span><span>Pass / Call <kbd>F</kbd></span><span>Dash <kbd>Space</kbd></span><span>Dribble + Move <kbd>RMB</kbd></span><span>Burst Combo <kbd>RMB + Space</kbd></span><span>Side-step Shot <kbd>A/D + Space + LMB</kbd></span><span>Fadeaway <kbd>S + Space + LMB</kbd></span><span>Shoot <kbd>LMB</kbd></span><span>Dunk / Putback <kbd>Tab</kbd></span></div>
         <div className="status3d"><i><b style={{height:`${stamina * 100}%`}}/></i>{charge > 0 && <i className="charge3d"><b style={{height:`${charge * 100}%`}}/></i>}{dunkCharge > 0 && <i className="dunk3d"><b style={{height:`${dunkCharge * 100}%`}}/></i>}</div>
       </>}
 
