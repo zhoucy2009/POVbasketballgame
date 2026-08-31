@@ -47,6 +47,7 @@
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
 }
+.onlineLobbyKeeper3d{display:none!important}
 
 body { font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif; }
 

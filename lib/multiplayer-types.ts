@@ -29,7 +29,7 @@ export type OnlineRoom = {
 export type SignalMessage = {
   id: number;
   fromId: string;
-  type: 'offer' | 'answer' | 'ice';
+  type: 'offer' | 'answer' | 'ice' | 'restart';
   payload: string;
 };
 
@@ -46,4 +46,5 @@ export type OnlineMatchSession = {
   room: OnlineRoom;
   role: 'host' | 'guest';
   channel: RTCDataChannel;
+  stateChannel: RTCDataChannel;
 };

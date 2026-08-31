@@ -175,7 +175,7 @@ export async function POST(request: Request) {
     if (action === 'signal') {
       const type = textValue(body.type);
       const payload = textValue(body.payload);
-      if (!['offer', 'answer', 'ice'].includes(type) || payload.length > 20_000) return responseJson({ error: '无效信令' }, session.cookie, 400);
+      if (!['offer', 'answer', 'ice', 'restart'].includes(type) || payload.length > 20_000) return responseJson({ error: '无效信令' }, session.cookie, 400);
       await db.prepare('INSERT INTO multiplayer_signals (room_id, from_player, signal_type, payload, created_at) VALUES (?, ?, ?, ?, ?)').bind(room.id, session.id, type, payload, now).run();
       return responseJson({ ok: true }, session.cookie);
     }

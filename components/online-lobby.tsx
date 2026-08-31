@@ -30,12 +30,16 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
   const [readySent, setReadySent] = useState(false);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const channelRef = useRef<RTCDataChannel | null>(null);
+  const stateChannelRef = useRef<RTCDataChannel | null>(null);
   const roomRef = useRef<OnlineRoom | null>(null);
   const meIdRef = useRef('');
   const lastSignalRef = useRef(0);
   const processedSignalsRef = useRef(new Set<number>());
   const queuedIceRef = useRef<RTCIceCandidateInit[]>([]);
   const handedOffRef = useRef(false);
+  const lastPeerDataAtRef = useRef(0);
+  const lastRestartAtRef = useRef(0);
+  const restartTimerRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     const saved = window.localStorage.getItem('unmatched-player-name');
@@ -46,65 +50,130 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
     await multiplayerPost({ action: 'signal', type, payload: JSON.stringify(payload) });
   }, []);
 
-  const bindChannel = useCallback((channel: RTCDataChannel) => {
-    channelRef.current = channel;
-    channel.onopen = () => setChannelReady(true);
-    channel.onclose = () => setChannelReady(false);
-    channel.onerror = () => setError('对手连接中断，正在重连');
+  const updateChannelReady = useCallback(() => {
+    setChannelReady(channelRef.current?.readyState === 'open' && stateChannelRef.current?.readyState === 'open');
   }, []);
+
+  const bindChannel = useCallback((channel: RTCDataChannel) => {
+    if (channel.label === 'unmatched-state') stateChannelRef.current = channel;
+    else channelRef.current = channel;
+    channel.onopen = () => { lastPeerDataAtRef.current = Date.now(); updateChannelReady(); };
+    channel.onclose = () => { updateChannelReady(); setError('对手连接中断，正在重连…'); };
+    channel.onerror = () => setError('网络波动，正在恢复连接…');
+    channel.addEventListener('message', () => { lastPeerDataAtRef.current = Date.now(); });
+    updateChannelReady();
+  }, [updateChannelReady]);
+
+  const restartConnection = useCallback(async () => {
+    const pc = pcRef.current;
+    const room = roomRef.current;
+    const meId = meIdRef.current;
+    if (!pc || !room || !meId || Date.now() - lastRestartAtRef.current < 3_500) return;
+    lastRestartAtRef.current = Date.now();
+    try {
+      if (room.hostId === meId) {
+        pc.restartIce();
+        const offer = await pc.createOffer({ iceRestart: true });
+        await pc.setLocalDescription(offer);
+        await sendSignal('offer', offer);
+      } else {
+        await sendSignal('restart', { requestedAt: Date.now() });
+      }
+    } catch {
+      setError('正在重试对局连接…');
+    }
+  }, [sendSignal]);
 
   const setupPeer = useCallback(async (room: OnlineRoom, meId: string) => {
     if (pcRef.current) return;
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }],
+      bundlePolicy: 'max-bundle',
+      iceCandidatePoolSize: 4,
     });
     pcRef.current = pc;
     pc.onicecandidate = (event) => { if (event.candidate) void sendSignal('ice', event.candidate.toJSON()); };
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') setError('无法建立对局连接，请重新进入房间');
+      if (pc.connectionState === 'connected') {
+        lastPeerDataAtRef.current = Date.now();
+        setError('');
+        if (restartTimerRef.current) window.clearTimeout(restartTimerRef.current);
+      } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        setError('网络波动，正在自动重连…');
+        if (restartTimerRef.current) window.clearTimeout(restartTimerRef.current);
+        restartTimerRef.current = window.setTimeout(() => {
+          if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') void restartConnection();
+        }, pc.connectionState === 'failed' ? 0 : 1_200);
+      }
     };
     if (room.hostId === meId) {
-      const channel = pc.createDataChannel('unmatched-1v1', { ordered: true });
-      bindChannel(channel);
+      bindChannel(pc.createDataChannel('unmatched-control', { ordered: true }));
+      bindChannel(pc.createDataChannel('unmatched-state', { ordered: false, maxRetransmits: 0 }));
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       await sendSignal('offer', offer);
     } else {
       pc.ondatachannel = (event) => bindChannel(event.channel);
     }
-  }, [bindChannel, sendSignal]);
+  }, [bindChannel, restartConnection, sendSignal]);
 
   const applySignals = useCallback(async (signals: SignalMessage[]) => {
     const pc = pcRef.current;
     if (!pc) return;
     for (const signal of signals) {
       if (processedSignalsRef.current.has(signal.id)) continue;
-      processedSignalsRef.current.add(signal.id);
-      lastSignalRef.current = Math.max(lastSignalRef.current, signal.id);
       const payload = JSON.parse(signal.payload) as RTCSessionDescriptionInit | RTCIceCandidateInit;
-      if (signal.type === 'offer' && !pc.currentRemoteDescription) {
+      if (signal.type === 'restart') {
+        if (roomRef.current?.hostId === meIdRef.current) await restartConnection();
+      } else if (signal.type === 'offer') {
         await pc.setRemoteDescription(payload as RTCSessionDescriptionInit);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         await sendSignal('answer', answer);
-      } else if (signal.type === 'answer' && !pc.currentRemoteDescription) {
+      } else if (signal.type === 'answer' && pc.signalingState === 'have-local-offer') {
         await pc.setRemoteDescription(payload as RTCSessionDescriptionInit);
       } else if (signal.type === 'ice') {
-        if (pc.remoteDescription) await pc.addIceCandidate(payload as RTCIceCandidateInit);
+        if (pc.remoteDescription) {
+          try { await pc.addIceCandidate(payload as RTCIceCandidateInit); }
+          catch { queuedIceRef.current.push(payload as RTCIceCandidateInit); }
+        }
         else queuedIceRef.current.push(payload as RTCIceCandidateInit);
       }
       if (pc.remoteDescription && queuedIceRef.current.length) {
         const queued = queuedIceRef.current.splice(0);
-        for (const candidate of queued) await pc.addIceCandidate(candidate);
+        for (const candidate of queued) {
+          try { await pc.addIceCandidate(candidate); } catch { /* Ignore candidates from an older ICE generation. */ }
+        }
       }
+      processedSignalsRef.current.add(signal.id);
+      lastSignalRef.current = Math.max(lastSignalRef.current, signal.id);
     }
-  }, [sendSignal]);
+  }, [restartConnection, sendSignal]);
+
+  const closePeer = useCallback(() => {
+    if (restartTimerRef.current) window.clearTimeout(restartTimerRef.current);
+    channelRef.current?.close();
+    stateChannelRef.current?.close();
+    pcRef.current?.close();
+    channelRef.current = null;
+    stateChannelRef.current = null;
+    pcRef.current = null;
+    roomRef.current = null;
+    processedSignalsRef.current.clear();
+    queuedIceRef.current = [];
+    lastSignalRef.current = 0;
+    handedOffRef.current = false;
+    setReadySent(false);
+    setChannelReady(false);
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
       const response = await fetch(`/api/multiplayer?since=${lastSignalRef.current}`, { cache: 'no-store' });
       const data = await response.json() as LobbySnapshot & { error?: string };
       if (!response.ok) throw new Error(data.error || '大厅加载失败');
+      const previousRoom = roomRef.current;
+      if (previousRoom && (!data.room || data.room.id !== previousRoom.id)) closePeer();
       setSnapshot(data);
       meIdRef.current = data.me.id;
       roomRef.current = data.room;
@@ -113,25 +182,36 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
         await applySignals(data.signals);
       }
       const channel = channelRef.current;
-      if (data.room?.status === 'playing' && channel?.readyState === 'open' && !handedOffRef.current) {
+      const stateChannel = stateChannelRef.current;
+      if (data.room?.status === 'playing' && channel?.readyState === 'open' && stateChannel?.readyState === 'open' && !handedOffRef.current) {
         handedOffRef.current = true;
-        onMatchStart({ room: data.room, role: data.room.hostId === data.me.id ? 'host' : 'guest', channel });
+        onMatchStart({ room: data.room, role: data.room.hostId === data.me.id ? 'host' : 'guest', channel, stateChannel });
       }
-      setError('');
+      if (!data.room) setError('');
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '大厅加载失败');
     }
-  }, [applySignals, onMatchStart, setupPeer]);
+  }, [applySignals, closePeer, onMatchStart, setupPeer]);
 
   useEffect(() => {
     void multiplayerPost({ action: 'heartbeat', name }).then(refresh).catch((reason) => setError(reason.message));
     const heartbeat = window.setInterval(() => { void multiplayerPost({ action: 'heartbeat', name }); }, 8_000);
-    const poll = window.setInterval(() => { void refresh(); }, roomRef.current ? 650 : 1_800);
+    const poll = window.setInterval(() => { void refresh(); }, 650);
+    const peerHeartbeat = window.setInterval(() => {
+      const control = channelRef.current;
+      if (!handedOffRef.current || control?.readyState !== 'open') return;
+      control.send(JSON.stringify({ type: 'heartbeat', at: Date.now() }));
+      if (lastPeerDataAtRef.current && Date.now() - lastPeerDataAtRef.current > 2_800) {
+        setError('对手数据暂停，正在自动恢复…');
+        void restartConnection();
+      }
+    }, 1_000);
     return () => {
-      window.clearInterval(heartbeat); window.clearInterval(poll);
-      if (!handedOffRef.current) { channelRef.current?.close(); pcRef.current?.close(); }
+      window.clearInterval(heartbeat); window.clearInterval(poll); window.clearInterval(peerHeartbeat);
+      if (restartTimerRef.current) window.clearTimeout(restartTimerRef.current);
+      channelRef.current?.close(); stateChannelRef.current?.close(); pcRef.current?.close();
     };
-  }, [name, refresh]);
+  }, [name, refresh, restartConnection]);
 
   const act = async (key: string, operation: () => Promise<unknown>) => {
     setBusy(key); setError('');
@@ -163,7 +243,7 @@ export default function OnlineLobby({ onBack, onPractice, onMatchStart }: Props)
       <Button className="readyButton3d" disabled={!channelReady || readySent || myReady} onClick={() => void act('ready', async () => { await multiplayerPost({ action: 'ready' }); setReadySent(true); })}>
         {busy === 'ready' ? <LoaderCircle className="animate-spin"/> : <Check/>}{myReady ? '已准备，等待对手' : '我已准备'}
       </Button>
-      <Button variant="ghost" onClick={() => void act('leave', async () => { await multiplayerPost({ action: 'leave' }); channelRef.current?.close(); pcRef.current?.close(); pcRef.current = null; setChannelReady(false); })}>退出房间</Button>
+      <Button variant="ghost" onClick={() => void act('leave', async () => { await multiplayerPost({ action: 'leave' }); closePeer(); })}>退出房间</Button>
     </>;
   }
 
