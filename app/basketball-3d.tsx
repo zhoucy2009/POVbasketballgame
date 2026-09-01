@@ -774,6 +774,12 @@ export default function Basketball3D() {
     const offBallBonus = Array.from({ length: athletes.length }, () => 0);
     const assistedShotUntil = Array.from({ length: athletes.length }, () => 0);
     const assistedShotBonus = Array.from({ length: athletes.length }, () => 0);
+    const defenderTrackedMark = Array.from({ length: athletes.length }, () => -1);
+    const defenderReactionUntil = Array.from({ length: athletes.length }, () => 0);
+    const defenderReadPosition = athletes.map((player) => player.position.clone());
+    const defenderCommittedVelocity = athletes.map(() => new THREE.Vector3());
+    const defenderLastMarkVelocity = athletes.map(() => new THREE.Vector3());
+    const defensiveAssignmentMemory: [Map<number, number>, Map<number, number>] = [new Map(), new Map()];
     const aiShotPlans: Array<AiShotPlan | null> = Array.from({ length: athletes.length }, () => null);
     const teamTactics: [TeamTactic | null, TeamTactic | null] = [null, null];
     let stealProtectionUntil = 0;
@@ -784,6 +790,7 @@ export default function Basketball3D() {
     let contactCameraKick = 0;
     let contactMessageAt = 0;
     let tacticCallMessageAt = 0;
+    let defenderReactionMessageAt = 0;
     let pendingPassReward: PendingPassReward | null = null;
     let lobPassActive = false;
     let blockFeedbackTimer: number | undefined;
@@ -973,10 +980,13 @@ export default function Basketball3D() {
         stationaryTime[index] = 0; separationMoveUntil[index] = 0; contactPressure[index] = 0; blockAttemptUntil[index] = 0;
         offBallCallUntil[index] = 0; offBallCallCooldown[index] = 0; offBallOpportunity[index] = 'none'; offBallBonus[index] = 0;
         assistedShotUntil[index] = 0; assistedShotBonus[index] = 0; aiShotPlans[index] = null;
+        defenderTrackedMark[index] = -1; defenderReactionUntil[index] = 0;
+        defenderReadPosition[index].copy(player.position); defenderCommittedVelocity[index].set(0, 0, 0); defenderLastMarkVelocity[index].set(0, 0, 0);
       });
       const owner = team === 0 ? 0 : 3;
+      defensiveAssignmentMemory[0].clear(); defensiveAssignmentMemory[1].clear();
       ball.owner = owner; ball.lastOwner = owner; ball.mode = 'held'; ball.passTarget = null; ball.scored = false; ball.velocity.set(0, 0, 0);
-      charging = false; shotCharge = 0; shotStyle = 'normal'; shotPending = false; pendingShotPower = 0; shotReleaseDelay = 0; shotGatherElapsed = 0; shotAirElapsed = 0; queuedShotStyle = 'normal'; queuedShotUntil = 0; delayedDashAt = 0; recentDirection = ''; recentDirectionAt = 0; userShotEntrySpeed = 0; userShotSettleTime = 0; ankleBreakWindow = 0; layingUp = false; layupElapsed = 0; layupReleased = false; layupAcrobatic = false; layupViewTurn = 0; acrobaticLayupArc = null; dunkCharging = false; dunkPower = 0; dunking = false; dunkElapsed = 0; dunkHasBall = false; dunkResolved = false; dribbling = false; dribbleGrace = 0; dribbleMove = 'forward'; dribbleSequenceMove = 'forward'; dribblePhase = 0; dribbleHand = 'right'; dribbleFromHand = 'right'; dribbleToHand = 'right'; dashTime = 0; dashCooldown = 0; spinDirection = 0; resetAt = 0; stealProtectionUntil = 0; contactCameraKick = 0; contactMessageAt = 0; tacticCallMessageAt = 0; pendingPassReward = null; lobPassActive = false; teamTactics[0] = null; teamTactics[1] = null;
+      charging = false; shotCharge = 0; shotStyle = 'normal'; shotPending = false; pendingShotPower = 0; shotReleaseDelay = 0; shotGatherElapsed = 0; shotAirElapsed = 0; queuedShotStyle = 'normal'; queuedShotUntil = 0; delayedDashAt = 0; recentDirection = ''; recentDirectionAt = 0; userShotEntrySpeed = 0; userShotSettleTime = 0; ankleBreakWindow = 0; layingUp = false; layupElapsed = 0; layupReleased = false; layupAcrobatic = false; layupViewTurn = 0; acrobaticLayupArc = null; dunkCharging = false; dunkPower = 0; dunking = false; dunkElapsed = 0; dunkHasBall = false; dunkResolved = false; dribbling = false; dribbleGrace = 0; dribbleMove = 'forward'; dribbleSequenceMove = 'forward'; dribblePhase = 0; dribbleHand = 'right'; dribbleFromHand = 'right'; dribbleToHand = 'right'; dashTime = 0; dashCooldown = 0; spinDirection = 0; resetAt = 0; stealProtectionUntil = 0; contactCameraKick = 0; contactMessageAt = 0; tacticCallMessageAt = 0; defenderReactionMessageAt = 0; pendingPassReward = null; lobPassActive = false; teamTactics[0] = null; teamTactics[1] = null;
     };
 
     const resetGame = (mode: GameMode) => {
@@ -1677,6 +1687,7 @@ export default function Basketball3D() {
 
     const defensiveAssignments = (defendingTeam: Team, offensiveFocus: number) => {
       const assignments = new Map<number, number>();
+      const rememberedAssignments = defensiveAssignmentMemory[defendingTeam];
       const defenders = athletes
         .map((player, index) => ({ player, index }))
         .filter(({ player, index }) => isActiveIndex(index) && player.team === defendingTeam && index !== 0)
@@ -1697,13 +1708,16 @@ export default function Basketball3D() {
         remaining.forEach((threat, threatOffset) => {
           const distance = horizontalDistance(athletes[defenders[depth]].position, athletes[threat].position);
           const focusBonus = threat === offensiveFocus ? -1.35 : 0;
-          search(depth + 1, remaining.filter((_, index) => index !== threatOffset), [...targets, threat], cost + distance + focusBonus);
+          const rememberedThreat = rememberedAssignments.get(defenders[depth]);
+          const switchPenalty = rememberedThreat !== undefined && rememberedThreat !== threat ? 2.35 : 0;
+          search(depth + 1, remaining.filter((_, index) => index !== threatOffset), [...targets, threat], cost + distance + focusBonus + switchPenalty);
         });
       };
       search(0, threats, [], 0);
       defenders.forEach((defender, index) => {
         if (bestTargets[index] !== undefined) assignments.set(defender, bestTargets[index]);
       });
+      defensiveAssignmentMemory[defendingTeam] = new Map(assignments);
       return assignments;
     };
 
@@ -2550,8 +2564,37 @@ export default function Basketball3D() {
           if (markIndex === undefined) { player.velocity.multiplyScalar(0.72); return; }
           const mark = athletes[markIndex];
           const onBall = markIndex === offensiveFocus;
-          const markToRim = hoop(mark.team).setY(0).sub(mark.position).normalize();
-          const target = mark.position.clone().addScaledVector(markToRim, onBall ? 0.78 : 1.05);
+          const markVelocity = mark.velocity.clone().setY(0);
+          if (defenderTrackedMark[index] !== markIndex) {
+            defenderTrackedMark[index] = markIndex;
+            defenderReactionUntil[index] = 0;
+            defenderReadPosition[index].copy(mark.position);
+            defenderCommittedVelocity[index].copy(markVelocity);
+            defenderLastMarkVelocity[index].copy(markVelocity);
+          }
+          const previousMarkVelocity = defenderLastMarkVelocity[index];
+          const previousMarkSpeed = previousMarkVelocity.length();
+          const currentMarkSpeed = markVelocity.length();
+          const suddenlyAccelerated = currentMarkSpeed > 3.45 && currentMarkSpeed - previousMarkSpeed > 0.7;
+          const sharplyChangedDirection = currentMarkSpeed > 2.5 && previousMarkSpeed > 2.1
+            && markVelocity.dot(previousMarkVelocity) / (currentMarkSpeed * previousMarkSpeed) < 0.48;
+          if (!onBall && now >= defenderReactionUntil[index] && (suddenlyAccelerated || sharplyChangedDirection)) {
+            defenderReactionUntil[index] = now + 1;
+            defenderCommittedVelocity[index].copy(previousMarkVelocity).clampLength(0, PLAYER_RUN_SPEED);
+            if (mark.team === 0 && now >= defenderReactionMessageAt) {
+              defenderReactionMessageAt = now + 1.15;
+              showMessage(sharplyChangedDirection ? '队友变向甩开防守！' : '队友突然加速，防守慢一拍！', 720);
+            }
+          }
+          if (!onBall && now < defenderReactionUntil[index]) {
+            defenderReadPosition[index].addScaledVector(defenderCommittedVelocity[index], dt);
+          } else {
+            defenderReadPosition[index].lerp(mark.position, 1 - Math.exp(-dt * (onBall ? 18 : 11)));
+          }
+          previousMarkVelocity.copy(markVelocity);
+          const markReadPosition = defenderReadPosition[index];
+          const markToRim = hoop(mark.team).setY(0).sub(markReadPosition).normalize();
+          const target = markReadPosition.clone().addScaledVector(markToRim, onBall ? 0.78 : 1.05);
           if (!onBall && ball.owner !== null) {
             const carrier = athletes[ball.owner];
             const carrierLane = readDrivingLane(ball.owner);
@@ -2566,7 +2609,7 @@ export default function Basketball3D() {
           const hittingOnBallScreen = onBall && offenseTactic?.kind === 'pick-roll' && offenseTactic.phase === 'screen' && nearScreen;
           const hittingFlareScreen = markIndex === offenseTactic?.spacer && offenseTactic.kind === 'flare' && offenseTactic.phase === 'screen' && nearScreen;
           const screenSpeed = hittingFlareScreen ? 0.48 : hittingOnBallScreen ? 0.62 : onBall ? 1.08 : 0.98;
-          moveToward(player, target, PLAYER_RUN_SPEED * screenSpeed, dt, mark.position);
+          moveToward(player, target, PLAYER_RUN_SPEED * screenSpeed, dt, markReadPosition);
           const reachDistance = horizontalDistance(player.position, mark.position);
           const shootingThreat = ball.owner === markIndex
             && ((mark.actionKind === 'shoot' || mark.actionKind === 'layup' || mark.actionKind === 'acrobatic-layup') && mark.action > 0.15
