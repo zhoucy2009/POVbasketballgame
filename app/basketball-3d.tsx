@@ -731,6 +731,7 @@ export default function Basketball3D() {
     const layupStartPosition = new THREE.Vector3();
     const layupFinishPosition = new THREE.Vector3();
     const layupPathDirection = new THREE.Vector3(1, 0, 0);
+    let acrobaticLayupArc: { start: THREE.Vector3; control: THREE.Vector3; end: THREE.Vector3; elapsed: number; duration: number } | null = null;
     let dunkCharging = false;
     let dunkPower = 0;
     let dunking = false;
@@ -871,6 +872,22 @@ export default function Basketball3D() {
       blockFeedbackTimer = window.setTimeout(() => setBlockImpact(false), 760);
     };
     const hoop = (team: Team) => new THREE.Vector3(team === 0 ? HOOP_X : -HOOP_X, 3.05, 0);
+    const setAcrobaticLayupArc = (from: THREE.Vector3, aim: THREE.Vector3, rim: THREE.Vector3) => {
+      const outward = from.clone().sub(rim).setY(0);
+      if (outward.lengthSq() < 0.01) outward.set(-Math.sign(rim.x) || -1, 0, 0);
+      else outward.normalize();
+      const control = from.clone().addScaledVector(outward, 0.22);
+      control.y = Math.max(HOOP_HEIGHT + 1.08, from.y + 0.9);
+      const end = aim.clone();
+      end.y = HOOP_HEIGHT - BALL_RADIUS * 1.4;
+      acrobaticLayupArc = {
+        start: from.clone(),
+        control,
+        end,
+        elapsed: 0,
+        duration: ACROBATIC_LAYUP_FLIGHT,
+      };
+    };
     const facingFromDirection = (direction: THREE.Vector3) => Math.atan2(direction.x, direction.z);
     const facePoint = (player: Athlete, target: THREE.Vector3) => {
       const direction = target.clone().sub(player.position).setY(0);
@@ -959,7 +976,7 @@ export default function Basketball3D() {
       });
       const owner = team === 0 ? 0 : 3;
       ball.owner = owner; ball.lastOwner = owner; ball.mode = 'held'; ball.passTarget = null; ball.scored = false; ball.velocity.set(0, 0, 0);
-      charging = false; shotCharge = 0; shotStyle = 'normal'; shotPending = false; pendingShotPower = 0; shotReleaseDelay = 0; shotGatherElapsed = 0; shotAirElapsed = 0; queuedShotStyle = 'normal'; queuedShotUntil = 0; delayedDashAt = 0; recentDirection = ''; recentDirectionAt = 0; userShotEntrySpeed = 0; userShotSettleTime = 0; ankleBreakWindow = 0; layingUp = false; layupElapsed = 0; layupReleased = false; layupAcrobatic = false; layupViewTurn = 0; dunkCharging = false; dunkPower = 0; dunking = false; dunkElapsed = 0; dunkHasBall = false; dunkResolved = false; dribbling = false; dribbleGrace = 0; dribbleMove = 'forward'; dribbleSequenceMove = 'forward'; dribblePhase = 0; dribbleHand = 'right'; dribbleFromHand = 'right'; dribbleToHand = 'right'; dashTime = 0; dashCooldown = 0; spinDirection = 0; resetAt = 0; stealProtectionUntil = 0; contactCameraKick = 0; contactMessageAt = 0; tacticCallMessageAt = 0; pendingPassReward = null; lobPassActive = false; teamTactics[0] = null; teamTactics[1] = null;
+      charging = false; shotCharge = 0; shotStyle = 'normal'; shotPending = false; pendingShotPower = 0; shotReleaseDelay = 0; shotGatherElapsed = 0; shotAirElapsed = 0; queuedShotStyle = 'normal'; queuedShotUntil = 0; delayedDashAt = 0; recentDirection = ''; recentDirectionAt = 0; userShotEntrySpeed = 0; userShotSettleTime = 0; ankleBreakWindow = 0; layingUp = false; layupElapsed = 0; layupReleased = false; layupAcrobatic = false; layupViewTurn = 0; acrobaticLayupArc = null; dunkCharging = false; dunkPower = 0; dunking = false; dunkElapsed = 0; dunkHasBall = false; dunkResolved = false; dribbling = false; dribbleGrace = 0; dribbleMove = 'forward'; dribbleSequenceMove = 'forward'; dribblePhase = 0; dribbleHand = 'right'; dribbleFromHand = 'right'; dribbleToHand = 'right'; dashTime = 0; dashCooldown = 0; spinDirection = 0; resetAt = 0; stealProtectionUntil = 0; contactCameraKick = 0; contactMessageAt = 0; tacticCallMessageAt = 0; pendingPassReward = null; lobPassActive = false; teamTactics[0] = null; teamTactics[1] = null;
     };
 
     const resetGame = (mode: GameMode) => {
@@ -1042,7 +1059,8 @@ export default function Basketball3D() {
       const aim = rim.clone();
       if (!ball.shotMake) aim.z += (Math.random() > 0.5 ? 1 : -1) * (0.48 + coneRead.contestStrength * 0.42);
       const t = ball.shotFlight;
-      ball.velocity.set((aim.x - from.x) / t, (aim.y - from.y + 4.9 * t * t) / t, (aim.z - from.z) / t);
+      if (layupAcrobatic) setAcrobaticLayupArc(from, aim, rim);
+      else ball.velocity.set((aim.x - from.x) / t, (aim.y - from.y + 4.9 * t * t) / t, (aim.z - from.z) / t);
       const finishLabel = contactPenalty > 0.035 ? '身体对抗上篮'
         : layupAcrobatic
         ? coneRead.defendersInCone === 0 ? '拉杆躲开封盖' : '拉杆仍受干扰'
@@ -1730,7 +1748,8 @@ export default function Basketball3D() {
       const aim = rim.clone();
       if (!ball.shotMake) aim.z += (Math.random() > 0.5 ? 1 : -1) * (0.58 + lanePressure * 0.32);
       const t = ball.shotFlight;
-      ball.velocity.set((aim.x - from.x) / t, (aim.y - from.y + 4.9 * t * t) / t, (aim.z - from.z) / t);
+      if (acrobatic) setAcrobaticLayupArc(from, aim, rim);
+      else ball.velocity.set((aim.x - from.x) / t, (aim.y - from.y + 4.9 * t * t) / t, (aim.z - from.z) / t);
       aiDecisionCooldown[owner] = 1.05;
       showMessage(`${acrobatic ? 'AI拉杆上篮' : player.team === 0 ? '队友突破上篮' : coneRead.defendersInCone > 0 ? '对手强攻上篮' : '对手空位上篮'} · ${Math.round(chance * 100)}%`, 820);
       return true;
@@ -1882,6 +1901,7 @@ export default function Basketball3D() {
         ball.shotAge = 0;
         lobPassActive = false;
         pendingPassReward = null;
+        acrobaticLayupArc = null;
       }
     };
 
@@ -2168,8 +2188,24 @@ export default function Basketball3D() {
       } else if (ball.mode === 'shot' || ball.mode === 'loose') {
         const previous = ball.position.clone();
         ball.shotAge += dt;
-        ball.velocity.y -= 9.8 * dt;
-        ball.position.addScaledVector(ball.velocity, dt);
+        const guidedArc = ball.mode === 'shot' ? acrobaticLayupArc : null;
+        if (guidedArc) {
+          guidedArc.elapsed = Math.min(guidedArc.duration, guidedArc.elapsed + dt);
+          const progress = clamp(guidedArc.elapsed / guidedArc.duration, 0, 1);
+          const inverse = 1 - progress;
+          ball.position.set(0, 0, 0)
+            .addScaledVector(guidedArc.start, inverse * inverse)
+            .addScaledVector(guidedArc.control, 2 * inverse * progress)
+            .addScaledVector(guidedArc.end, progress * progress);
+          const startTangent = guidedArc.control.clone().sub(guidedArc.start);
+          const endTangent = guidedArc.end.clone().sub(guidedArc.control);
+          ball.velocity.copy(startTangent).multiplyScalar(2 * inverse / guidedArc.duration)
+            .addScaledVector(endTangent, 2 * progress / guidedArc.duration);
+          if (progress >= 1) acrobaticLayupArc = null;
+        } else {
+          ball.velocity.y -= 9.8 * dt;
+          ball.position.addScaledVector(ball.velocity, dt);
+        }
         ball.group.rotation.x += dt * 15;
         ball.group.rotation.z += dt * 8;
         keepBallOnCourt();
@@ -2189,6 +2225,7 @@ export default function Basketball3D() {
         if (blockerIndex >= 0) {
           const shooter = athletes[ball.lastOwner];
           ball.mode = 'loose';
+          acrobaticLayupArc = null;
           ball.shotAge = 0;
           ball.velocity.set(-ball.velocity.x * 0.72, 5.1, -ball.velocity.z * 0.4 + (Math.random() - 0.5) * 4.2);
           shooter.action = Math.max(shooter.action, 0.58); shooter.actionKind = 'stumble';
