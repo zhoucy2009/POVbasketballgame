@@ -113,6 +113,7 @@ const LAYUP_START_RADIUS = 5.1;
 const LAYUP_MIN_SPEED = 2.45;
 const LAYUP_DURATION = 1.28;
 const LAYUP_APPROACH_DURATION = 0.74;
+const ACROBATIC_LAYUP_FLIGHT = 0.96;
 const DUNK_START_RADIUS = 5.2;
 const PUTBACK_PLAYER_RADIUS = 2.65;
 
@@ -1016,7 +1017,9 @@ export default function Basketball3D() {
       const contactPenalty = contactPressure[0] * (layupAcrobatic ? 0.16 : 0.22);
       const chance = clamp(0.78 + openBonus + acrobaticBonus - coneRead.contestStrength * 0.6 - contactPenalty, 0.01, 0.98);
       layupReleased = true;
-      ball.owner = null; ball.mode = 'shot'; ball.lastOwner = 0; ball.shotAge = 0; ball.shotFlight = layupAcrobatic ? 0.62 : 0.56; ball.shotPoints = 2; ball.scored = false;
+      // The double-clutch releases beside the rim. Give it enough hang time to
+      // clear the underside of the physical rim before dropping through it.
+      ball.owner = null; ball.mode = 'shot'; ball.lastOwner = 0; ball.shotAge = 0; ball.shotFlight = layupAcrobatic ? ACROBATIC_LAYUP_FLIGHT : 0.56; ball.shotPoints = 2; ball.scored = false;
       ball.shotMake = Math.random() < chance;
       const releaseHand: DribbleHand = layupAcrobatic && layupDodgeSide < 0 ? 'left' : 'right';
       const from = getHandPosition(me, releaseHand);
@@ -1559,7 +1562,7 @@ export default function Basketball3D() {
       player.action = 1.08;
       player.actionKind = acrobatic ? 'acrobatic-layup' : 'layup';
       facePoint(player, rim);
-      ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = 0.7; ball.shotPoints = 2; ball.scored = false;
+      ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = acrobatic ? ACROBATIC_LAYUP_FLIGHT : 0.7; ball.shotPoints = 2; ball.scored = false;
       const coneRead = readShotCone(owner, 2.75, Math.PI * 0.24);
       const openBonus = coneRead.defendersInCone === 0 ? 0.09 + (acrobatic ? 0.06 : 0) : 0;
       const contactPenalty = contactPressure[owner] * (acrobatic ? 0.14 : 0.2);
