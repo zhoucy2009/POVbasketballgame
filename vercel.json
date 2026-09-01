@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": null,
+  "installCommand": "",
+  "rewrites": [
+    {
+      "source": "/:path*",
+      "destination": "https://unmatched-hoops.zipxing.chatgpt.site/:path*"
+    }
+  ]
+}
