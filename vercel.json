@@ -6,6 +6,10 @@
   "outputDirectory": "_vercel_proxy",
   "rewrites": [
     {
+      "source": "/",
+      "destination": "https://unmatched-hoops.zipxing.chatgpt.site/"
+    },
+    {
       "source": "/:path*",
       "destination": "https://unmatched-hoops.zipxing.chatgpt.site/:path*"
     }
