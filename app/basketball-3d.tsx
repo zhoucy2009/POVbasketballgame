@@ -731,7 +731,8 @@ export default function Basketball3D() {
     const layupStartPosition = new THREE.Vector3();
     const layupFinishPosition = new THREE.Vector3();
     const layupPathDirection = new THREE.Vector3(1, 0, 0);
-    let acrobaticLayupArc: { start: THREE.Vector3; control: THREE.Vector3; end: THREE.Vector3; elapsed: number; duration: number } | null = null;
+    let layupShotActive = false;
+    let layupArc: { start: THREE.Vector3; lift: THREE.Vector3; drop: THREE.Vector3; end: THREE.Vector3; elapsed: number; duration: number } | null = null;
     let dunkCharging = false;
     let dunkPower = 0;
     let dunking = false;
@@ -879,20 +880,26 @@ export default function Basketball3D() {
       blockFeedbackTimer = window.setTimeout(() => setBlockImpact(false), 760);
     };
     const hoop = (team: Team) => new THREE.Vector3(team === 0 ? HOOP_X : -HOOP_X, 3.05, 0);
-    const setAcrobaticLayupArc = (from: THREE.Vector3, aim: THREE.Vector3, rim: THREE.Vector3) => {
+    const setLayupArc = (from: THREE.Vector3, aim: THREE.Vector3, rim: THREE.Vector3, acrobatic: boolean) => {
       const outward = from.clone().sub(rim).setY(0);
+      const releaseRadius = outward.length();
       if (outward.lengthSq() < 0.01) outward.set(-Math.sign(rim.x) || -1, 0, 0);
       else outward.normalize();
-      const control = from.clone().addScaledVector(outward, 0.22);
-      control.y = Math.max(HOOP_HEIGHT + 1.08, from.y + 0.9);
+      const arcHeight = acrobatic ? 1.08 : 0.82;
+      const liftRadius = Math.max(1.1, releaseRadius + (acrobatic ? 0.58 : 0.7));
+      const lift = rim.clone().setY(from.y).addScaledVector(outward, liftRadius);
+      lift.y = Math.max(HOOP_HEIGHT + arcHeight, from.y + (acrobatic ? 0.9 : 0.7));
+      const drop = aim.clone();
+      drop.y = HOOP_HEIGHT + arcHeight * 0.78;
       const end = aim.clone();
       end.y = HOOP_HEIGHT - BALL_RADIUS * 1.4;
-      acrobaticLayupArc = {
+      layupArc = {
         start: from.clone(),
-        control,
+        lift,
+        drop,
         end,
         elapsed: 0,
-        duration: ACROBATIC_LAYUP_FLIGHT,
+        duration: acrobatic ? ACROBATIC_LAYUP_FLIGHT : 0.72,
       };
     };
     const facingFromDirection = (direction: THREE.Vector3) => Math.atan2(direction.x, direction.z);
@@ -986,7 +993,7 @@ export default function Basketball3D() {
       const owner = team === 0 ? 0 : 3;
       defensiveAssignmentMemory[0].clear(); defensiveAssignmentMemory[1].clear();
       ball.owner = owner; ball.lastOwner = owner; ball.mode = 'held'; ball.passTarget = null; ball.scored = false; ball.velocity.set(0, 0, 0);
-      charging = false; shotCharge = 0; shotStyle = 'normal'; shotPending = false; pendingShotPower = 0; shotReleaseDelay = 0; shotGatherElapsed = 0; shotAirElapsed = 0; queuedShotStyle = 'normal'; queuedShotUntil = 0; delayedDashAt = 0; recentDirection = ''; recentDirectionAt = 0; userShotEntrySpeed = 0; userShotSettleTime = 0; ankleBreakWindow = 0; layingUp = false; layupElapsed = 0; layupReleased = false; layupAcrobatic = false; layupViewTurn = 0; acrobaticLayupArc = null; dunkCharging = false; dunkPower = 0; dunking = false; dunkElapsed = 0; dunkHasBall = false; dunkResolved = false; dribbling = false; dribbleGrace = 0; dribbleMove = 'forward'; dribbleSequenceMove = 'forward'; dribblePhase = 0; dribbleHand = 'right'; dribbleFromHand = 'right'; dribbleToHand = 'right'; dashTime = 0; dashCooldown = 0; spinDirection = 0; resetAt = 0; stealProtectionUntil = 0; contactCameraKick = 0; contactMessageAt = 0; tacticCallMessageAt = 0; defenderReactionMessageAt = 0; pendingPassReward = null; lobPassActive = false; teamTactics[0] = null; teamTactics[1] = null;
+      charging = false; shotCharge = 0; shotStyle = 'normal'; shotPending = false; pendingShotPower = 0; shotReleaseDelay = 0; shotGatherElapsed = 0; shotAirElapsed = 0; queuedShotStyle = 'normal'; queuedShotUntil = 0; delayedDashAt = 0; recentDirection = ''; recentDirectionAt = 0; userShotEntrySpeed = 0; userShotSettleTime = 0; ankleBreakWindow = 0; layingUp = false; layupElapsed = 0; layupReleased = false; layupAcrobatic = false; layupViewTurn = 0; layupShotActive = false; layupArc = null; dunkCharging = false; dunkPower = 0; dunking = false; dunkElapsed = 0; dunkHasBall = false; dunkResolved = false; dribbling = false; dribbleGrace = 0; dribbleMove = 'forward'; dribbleSequenceMove = 'forward'; dribblePhase = 0; dribbleHand = 'right'; dribbleFromHand = 'right'; dribbleToHand = 'right'; dashTime = 0; dashCooldown = 0; spinDirection = 0; resetAt = 0; stealProtectionUntil = 0; contactCameraKick = 0; contactMessageAt = 0; tacticCallMessageAt = 0; defenderReactionMessageAt = 0; pendingPassReward = null; lobPassActive = false; teamTactics[0] = null; teamTactics[1] = null;
     };
 
     const resetGame = (mode: GameMode) => {
@@ -1068,9 +1075,8 @@ export default function Basketball3D() {
       ball.position.copy(from);
       const aim = rim.clone();
       if (!ball.shotMake) aim.z += (Math.random() > 0.5 ? 1 : -1) * (0.48 + coneRead.contestStrength * 0.42);
-      const t = ball.shotFlight;
-      if (layupAcrobatic) setAcrobaticLayupArc(from, aim, rim);
-      else ball.velocity.set((aim.x - from.x) / t, (aim.y - from.y + 4.9 * t * t) / t, (aim.z - from.z) / t);
+      layupShotActive = true;
+      setLayupArc(from, aim, rim, layupAcrobatic);
       const finishLabel = contactPenalty > 0.035 ? '身体对抗上篮'
         : layupAcrobatic
         ? coneRead.defendersInCone === 0 ? '拉杆躲开封盖' : '拉杆仍受干扰'
@@ -1126,6 +1132,8 @@ export default function Basketball3D() {
         sendPeer({ type: 'command', command: { kind: 'shot', power } satisfies PeerCommand });
       }
       const player = athletes[owner];
+      layupShotActive = false;
+      layupArc = null;
       const appliedStyle = owner === 0 ? shotStyle : styleOverride;
       player.jumpV = Math.max(player.jumpV, appliedStyle === 'fade' ? 5.35 : 5.15);
       player.action = owner === 0 ? Math.max(player.action, 0.44) : 1.15;
@@ -1500,6 +1508,8 @@ export default function Basketball3D() {
 
     const scoreBasket = (team: Team, points: number, now: number) => {
       if (ball.scored) return;
+      layupShotActive = false;
+      layupArc = null;
       ball.scored = true; ball.mode = 'dead'; ball.velocity.set(0, 0, 0);
       gameScore[team] += points; setScore([...gameScore] as [number, number]);
       nextPossession = modeRef.current === 'practice' ? 0 : team === 0 ? 1 : 0;
@@ -1761,9 +1771,8 @@ export default function Basketball3D() {
       ball.position.copy(from);
       const aim = rim.clone();
       if (!ball.shotMake) aim.z += (Math.random() > 0.5 ? 1 : -1) * (0.58 + lanePressure * 0.32);
-      const t = ball.shotFlight;
-      if (acrobatic) setAcrobaticLayupArc(from, aim, rim);
-      else ball.velocity.set((aim.x - from.x) / t, (aim.y - from.y + 4.9 * t * t) / t, (aim.z - from.z) / t);
+      layupShotActive = true;
+      setLayupArc(from, aim, rim, acrobatic);
       aiDecisionCooldown[owner] = 1.05;
       showMessage(`${acrobatic ? 'AI拉杆上篮' : player.team === 0 ? '队友突破上篮' : coneRead.defendersInCone > 0 ? '对手强攻上篮' : '对手空位上篮'} · ${Math.round(chance * 100)}%`, 820);
       return true;
@@ -1780,6 +1789,8 @@ export default function Basketball3D() {
       player.action = alleyOop ? 1.34 : putback ? 1.28 : 1.18;
       player.actionKind = 'dunk';
       facePoint(player, rim);
+      layupShotActive = false;
+      layupArc = null;
       ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = alleyOop ? 0.42 : putback ? 0.4 : 0.5; ball.shotPoints = 2; ball.scored = false;
       const contactPenalty = contactPressure[owner] * 0.18;
       const chance = clamp((alleyOop ? 0.84 : putback ? 0.68 : 0.91) + (coneRead.defendersInCone === 0 ? 0.05 : 0) - coneRead.contestStrength * (putback ? 0.5 : 0.62) - contactPenalty, 0.01, 0.98);
@@ -1812,6 +1823,7 @@ export default function Basketball3D() {
       }
       if (hitBoundary && (ball.mode === 'shot' || ball.mode === 'pass')) {
         ball.mode = 'loose'; ball.passTarget = null; ball.shotMake = false; ball.shotAge = 0; lobPassActive = false; pendingPassReward = null;
+        layupShotActive = false; layupArc = null;
       }
     };
 
@@ -1915,7 +1927,8 @@ export default function Basketball3D() {
         ball.shotAge = 0;
         lobPassActive = false;
         pendingPassReward = null;
-        acrobaticLayupArc = null;
+        layupShotActive = false;
+        layupArc = null;
       }
     };
 
@@ -1981,7 +1994,7 @@ export default function Basketball3D() {
 
     const resolveBallPlayerCollisions = () => {
       for (let index = 0; index < athletes.length; index += 1) {
-        if (!isActiveIndex(index) || index === ball.lastOwner && ball.shotAge < 0.18) continue;
+        if (!isActiveIndex(index) || index === ball.lastOwner && (layupShotActive || ball.shotAge < 0.18)) continue;
         const player = athletes[index];
         const closest = new THREE.Vector3(
           player.position.x,
@@ -2202,20 +2215,23 @@ export default function Basketball3D() {
       } else if (ball.mode === 'shot' || ball.mode === 'loose') {
         const previous = ball.position.clone();
         ball.shotAge += dt;
-        const guidedArc = ball.mode === 'shot' ? acrobaticLayupArc : null;
+        const guidedArc = ball.mode === 'shot' ? layupArc : null;
         if (guidedArc) {
           guidedArc.elapsed = Math.min(guidedArc.duration, guidedArc.elapsed + dt);
           const progress = clamp(guidedArc.elapsed / guidedArc.duration, 0, 1);
           const inverse = 1 - progress;
           ball.position.set(0, 0, 0)
-            .addScaledVector(guidedArc.start, inverse * inverse)
-            .addScaledVector(guidedArc.control, 2 * inverse * progress)
-            .addScaledVector(guidedArc.end, progress * progress);
-          const startTangent = guidedArc.control.clone().sub(guidedArc.start);
-          const endTangent = guidedArc.end.clone().sub(guidedArc.control);
-          ball.velocity.copy(startTangent).multiplyScalar(2 * inverse / guidedArc.duration)
-            .addScaledVector(endTangent, 2 * progress / guidedArc.duration);
-          if (progress >= 1) acrobaticLayupArc = null;
+            .addScaledVector(guidedArc.start, inverse * inverse * inverse)
+            .addScaledVector(guidedArc.lift, 3 * inverse * inverse * progress)
+            .addScaledVector(guidedArc.drop, 3 * inverse * progress * progress)
+            .addScaledVector(guidedArc.end, progress * progress * progress);
+          const startTangent = guidedArc.lift.clone().sub(guidedArc.start);
+          const middleTangent = guidedArc.drop.clone().sub(guidedArc.lift);
+          const endTangent = guidedArc.end.clone().sub(guidedArc.drop);
+          ball.velocity.copy(startTangent).multiplyScalar(3 * inverse * inverse / guidedArc.duration)
+            .addScaledVector(middleTangent, 6 * inverse * progress / guidedArc.duration)
+            .addScaledVector(endTangent, 3 * progress * progress / guidedArc.duration);
+          if (progress >= 1) layupArc = null;
         } else {
           ball.velocity.y -= 9.8 * dt;
           ball.position.addScaledVector(ball.velocity, dt);
@@ -2239,7 +2255,8 @@ export default function Basketball3D() {
         if (blockerIndex >= 0) {
           const shooter = athletes[ball.lastOwner];
           ball.mode = 'loose';
-          acrobaticLayupArc = null;
+          layupShotActive = false;
+          layupArc = null;
           ball.shotAge = 0;
           ball.velocity.set(-ball.velocity.x * 0.72, 5.1, -ball.velocity.z * 0.4 + (Math.random() - 0.5) * 4.2);
           shooter.action = Math.max(shooter.action, 0.58); shooter.actionKind = 'stumble';
@@ -2261,12 +2278,15 @@ export default function Basketball3D() {
         if (ball.mode === 'shot' && !ball.scored && ball.shotAge >= ball.shotFlight + 0.32) {
           ball.mode = 'loose';
           ball.shotMake = false;
+          layupShotActive = false;
+          layupArc = null;
           showMessage('篮板球');
         }
 
         if (!ball.scored && ball.position.y <= BALL_RADIUS) {
           ball.position.y = BALL_RADIUS; ball.velocity.y = Math.abs(ball.velocity.y) * 0.48;
           ball.velocity.x *= 0.8; ball.velocity.z *= 0.8; ball.mode = 'loose';
+          layupShotActive = false; layupArc = null;
         }
         if (ball.mode === 'loose' && ball.shotAge > 0.12) {
           let nearest = -1; let nearestDistance = 99;
