@@ -48,7 +48,10 @@ type DribbleHand = 'left' | 'right';
 type ShotStyle = 'normal' | 'step-left' | 'step-right' | 'fade';
 
 type TacticPhase = 'setup' | 'screen' | 'roll';
+type TacticKind = 'pick-roll' | 'flare' | 'backdoor';
+type OpportunityKind = 'none' | 'three' | 'cut' | 'lob';
 type TeamTactic = {
+  kind: TacticKind;
   handler: number;
   screener: number;
   spacer: number;
@@ -57,7 +60,8 @@ type TeamTactic = {
   expiresAt: number;
   phase: TacticPhase;
 };
-type AiShotPlan = { releaseAt: number; power: number };
+type AiShotPlan = { releaseAt: number; power: number; style: ShotStyle; landing: THREE.Vector3 };
+type PendingPassReward = { receiver: number; bonus: number; kind: OpportunityKind; expiresAt: number };
 
 type BallState = {
   group: THREE.Group;
@@ -763,6 +767,12 @@ export default function Basketball3D() {
     const separationMoveUntil = Array.from({ length: athletes.length }, () => 0);
     const contactPressure = Array.from({ length: athletes.length }, () => 0);
     const blockAttemptUntil = Array.from({ length: athletes.length }, () => 0);
+    const offBallCallUntil = Array.from({ length: athletes.length }, () => 0);
+    const offBallCallCooldown = Array.from({ length: athletes.length }, () => 0);
+    const offBallOpportunity = Array.from({ length: athletes.length }, (): OpportunityKind => 'none');
+    const offBallBonus = Array.from({ length: athletes.length }, () => 0);
+    const assistedShotUntil = Array.from({ length: athletes.length }, () => 0);
+    const assistedShotBonus = Array.from({ length: athletes.length }, () => 0);
     const aiShotPlans: Array<AiShotPlan | null> = Array.from({ length: athletes.length }, () => null);
     const teamTactics: [TeamTactic | null, TeamTactic | null] = [null, null];
     let stealProtectionUntil = 0;
@@ -772,6 +782,9 @@ export default function Basketball3D() {
     let blockCameraKick = 0;
     let contactCameraKick = 0;
     let contactMessageAt = 0;
+    let tacticCallMessageAt = 0;
+    let pendingPassReward: PendingPassReward | null = null;
+    let lobPassActive = false;
     let blockFeedbackTimer: number | undefined;
     type PeerPlayerState = { seq: number; x: number; z: number; vx: number; vz: number; facing: number; jump: number; action: number; actionKind: MotionName; moveKind: DribbleMove };
     type PeerCommand = { kind: 'shot'; power: number } | { kind: 'layup'; acrobatic: boolean } | { kind: 'jump' | 'steal' | 'dunk' };
@@ -940,11 +953,13 @@ export default function Basketball3D() {
         player.moveKind = 'forward'; player.moveUntil = 0; player.dribblePhase = index * 0.17; player.dribbleHand = index % 2 ? 'left' : 'right';
         player.group.visible = isActiveIndex(index) && (index !== 0 || !viewModel);
         aiDecisionCooldown[index] = 0.2 + index * 0.08; aiPassCooldown[index] = 0; aiShotCooldown[index] = 0.8 + index * 0.08;
-        stationaryTime[index] = 0; separationMoveUntil[index] = 0; contactPressure[index] = 0; blockAttemptUntil[index] = 0; aiShotPlans[index] = null;
+        stationaryTime[index] = 0; separationMoveUntil[index] = 0; contactPressure[index] = 0; blockAttemptUntil[index] = 0;
+        offBallCallUntil[index] = 0; offBallCallCooldown[index] = 0; offBallOpportunity[index] = 'none'; offBallBonus[index] = 0;
+        assistedShotUntil[index] = 0; assistedShotBonus[index] = 0; aiShotPlans[index] = null;
       });
       const owner = team === 0 ? 0 : 3;
       ball.owner = owner; ball.lastOwner = owner; ball.mode = 'held'; ball.passTarget = null; ball.scored = false; ball.velocity.set(0, 0, 0);
-      charging = false; shotCharge = 0; shotStyle = 'normal'; shotPending = false; pendingShotPower = 0; shotReleaseDelay = 0; shotGatherElapsed = 0; shotAirElapsed = 0; queuedShotStyle = 'normal'; queuedShotUntil = 0; delayedDashAt = 0; recentDirection = ''; recentDirectionAt = 0; userShotEntrySpeed = 0; userShotSettleTime = 0; ankleBreakWindow = 0; layingUp = false; layupElapsed = 0; layupReleased = false; layupAcrobatic = false; layupViewTurn = 0; dunkCharging = false; dunkPower = 0; dunking = false; dunkElapsed = 0; dunkHasBall = false; dunkResolved = false; dribbling = false; dribbleGrace = 0; dribbleMove = 'forward'; dribbleSequenceMove = 'forward'; dribblePhase = 0; dribbleHand = 'right'; dribbleFromHand = 'right'; dribbleToHand = 'right'; dashTime = 0; dashCooldown = 0; spinDirection = 0; resetAt = 0; stealProtectionUntil = 0; contactCameraKick = 0; contactMessageAt = 0; teamTactics[0] = null; teamTactics[1] = null;
+      charging = false; shotCharge = 0; shotStyle = 'normal'; shotPending = false; pendingShotPower = 0; shotReleaseDelay = 0; shotGatherElapsed = 0; shotAirElapsed = 0; queuedShotStyle = 'normal'; queuedShotUntil = 0; delayedDashAt = 0; recentDirection = ''; recentDirectionAt = 0; userShotEntrySpeed = 0; userShotSettleTime = 0; ankleBreakWindow = 0; layingUp = false; layupElapsed = 0; layupReleased = false; layupAcrobatic = false; layupViewTurn = 0; dunkCharging = false; dunkPower = 0; dunking = false; dunkElapsed = 0; dunkHasBall = false; dunkResolved = false; dribbling = false; dribbleGrace = 0; dribbleMove = 'forward'; dribbleSequenceMove = 'forward'; dribblePhase = 0; dribbleHand = 'right'; dribbleFromHand = 'right'; dribbleToHand = 'right'; dashTime = 0; dashCooldown = 0; spinDirection = 0; resetAt = 0; stealProtectionUntil = 0; contactCameraKick = 0; contactMessageAt = 0; tacticCallMessageAt = 0; pendingPassReward = null; lobPassActive = false; teamTactics[0] = null; teamTactics[1] = null;
     };
 
     const resetGame = (mode: GameMode) => {
@@ -1077,13 +1092,14 @@ export default function Basketball3D() {
       setCharge(0);
     };
 
-    const releaseShot = (owner: number, power: number) => {
+    const releaseShot = (owner: number, power: number, styleOverride: ShotStyle = 'normal') => {
       if (ball.owner !== owner) return;
       if (owner === 0 && onlineSessionRef.current?.role === 'guest') {
         sendPeer({ type: 'command', command: { kind: 'shot', power } satisfies PeerCommand });
       }
       const player = athletes[owner];
-      player.jumpV = Math.max(player.jumpV, owner === 0 && shotStyle === 'fade' ? 5.35 : 5.15);
+      const appliedStyle = owner === 0 ? shotStyle : styleOverride;
+      player.jumpV = Math.max(player.jumpV, appliedStyle === 'fade' ? 5.35 : 5.15);
       player.action = owner === 0 ? Math.max(player.action, 0.44) : 1.15;
       player.actionKind = 'shoot';
       ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = 1.02 + Math.abs(player.position.x) * 0.014; ball.scored = false;
@@ -1094,7 +1110,7 @@ export default function Basketball3D() {
       const coneRead = readShotCone(owner);
       const stability = shotStability(owner);
       const currentTime = performance.now() / 1000;
-      const styleCreatedSpace = owner === 0 && shotStyle !== 'normal';
+      const styleCreatedSpace = appliedStyle !== 'normal';
       const dribbleCreatedSpace = separationMoveUntil[owner] > currentTime;
       const actionBonus = coneRead.defendersInCone === 0
         ? styleCreatedSpace ? 0.09 : dribbleCreatedSpace ? 0.07 : 0
@@ -1104,8 +1120,10 @@ export default function Basketball3D() {
       const stabilityPenalty = (1 - stability) * 0.3;
       const contestPenalty = coneRead.contestStrength * 0.58;
       const contactPenalty = contactPressure[owner] * 0.2;
-      const chance = clamp(baseShotAccuracy(distance) + openBonus + actionBonus - timingPenalty - stabilityPenalty - contestPenalty - contactPenalty, 0.01, 0.99);
+      const assistedBonus = coneRead.defendersInCone === 0 && assistedShotUntil[owner] > currentTime ? assistedShotBonus[owner] : 0;
+      const chance = clamp(baseShotAccuracy(distance) + openBonus + actionBonus + assistedBonus - timingPenalty - stabilityPenalty - contestPenalty - contactPenalty, 0.01, 0.99);
       ball.shotMake = Math.random() < chance;
+      assistedShotUntil[owner] = 0; assistedShotBonus[owner] = 0;
       const probabilityLabel = `${Math.round(chance * 100)}%`;
       if (contactPenalty > 0.035) showMessage(`身体对抗出手 · ${probabilityLabel}`, 780);
       else if (coneRead.contestStrength > 0.08) {
@@ -1113,7 +1131,8 @@ export default function Basketball3D() {
           ? coneRead.contestStrength > 0.62 ? `严重干扰 · ${probabilityLabel}` : `投篮受干扰 · ${probabilityLabel}`
           : player.team === 0 ? `队友投篮受干扰 · ${probabilityLabel}` : coneRead.contestStrength > 0.62 ? `强力干扰 · ${probabilityLabel}` : `成功干扰 · ${probabilityLabel}`;
         showMessage(label, 780);
-      } else if (stability < 0.72) showMessage(`移动飘投 · ${probabilityLabel}`, 780);
+      } else if (assistedBonus > 0) showMessage(`战术接球加成 +${Math.round(assistedBonus * 100)}% · ${probabilityLabel}`, 900);
+      else if (stability < 0.72) showMessage(`移动飘投 · ${probabilityLabel}`, 780);
       else if (actionBonus > 0) showMessage(`动作创造空位 · ${probabilityLabel}`, 780);
       else showMessage(`空位出手 · ${probabilityLabel}`, 720);
       ball.shotPoints = distance > 7 ? 3 : 2;
@@ -1165,19 +1184,56 @@ export default function Basketball3D() {
       dunkPower = 0; setDunkCharge(0);
     };
 
+    const preparePassReward = (target: number, now: number, forcedKind?: OpportunityKind) => {
+      const kind = forcedKind ?? (offBallCallUntil[target] > now ? offBallOpportunity[target] : 'none');
+      const bonus = kind === 'none' ? 0 : forcedKind ? Math.max(0.08, offBallBonus[target]) : offBallBonus[target];
+      pendingPassReward = bonus > 0 ? { receiver: target, bonus: clamp(bonus, 0.04, 0.1), kind, expiresAt: now + 1.4 } : null;
+    };
+
     const sendPass = (owner: number, target: number, label = '传球') => {
       if (ball.owner !== owner || owner === target || athletes[owner].team !== athletes[target].team) return false;
+      const now = performance.now() / 1000;
       const passer = athletes[owner];
       passer.action = 0.46; passer.actionKind = 'pass';
       facePoint(passer, athletes[target].position);
       ball.owner = null; ball.mode = 'pass'; ball.passTarget = target; ball.lastOwner = owner; ball.scored = false; ball.shotAge = 0;
       ball.position.copy(getGatherPosition(passer));
-      const catchPoint = athletes[target].position.clone().addScaledVector(athletes[target].velocity, 0.16).add(new THREE.Vector3(0, 1.3, 0));
+      const catchPoint = athletes[target].position.clone().addScaledVector(athletes[target].velocity, 0.11).add(new THREE.Vector3(0, 1.3, 0));
       const distance = catchPoint.distanceTo(ball.position);
-      ball.velocity.copy(catchPoint.sub(ball.position).normalize().multiplyScalar(clamp(11.8 + distance * 0.18, 11.8, 15.2)));
-      aiPassCooldown[owner] = 1.15;
-      aiDecisionCooldown[target] = 0.38;
+      ball.velocity.copy(catchPoint.sub(ball.position).normalize().multiplyScalar(clamp(18.2 + distance * 0.24, 18.2, 23.5)));
+      lobPassActive = false;
+      preparePassReward(target, now);
+      aiPassCooldown[owner] = 0.82;
+      aiDecisionCooldown[target] = 0.25;
       showMessage(label, 650);
+      return true;
+    };
+
+    const sendLobPass = (owner: number, target: number, label = '空中接力！') => {
+      if (ball.owner !== owner || owner === target || athletes[owner].team !== athletes[target].team) return false;
+      const now = performance.now() / 1000;
+      const passer = athletes[owner];
+      const receiver = athletes[target];
+      const rimGround = hoop(receiver.team).setY(0);
+      if (horizontalDistance(receiver.position, rimGround) > 4.2 || passLaneRisk(owner, target) > 0.9) return false;
+      passer.action = 0.52; passer.actionKind = 'pass';
+      facePoint(passer, receiver.position);
+      ball.owner = null; ball.mode = 'pass'; ball.passTarget = target; ball.lastOwner = owner; ball.scored = false; ball.shotAge = 0;
+      ball.position.copy(getGatherPosition(passer));
+      const catchPoint = receiver.position.clone().addScaledVector(receiver.velocity, 0.24);
+      catchPoint.y = 2.55 + Math.min(0.35, receiver.jump);
+      const distance = horizontalDistance(ball.position, catchPoint);
+      const flight = clamp(distance / 16.5, 0.46, 0.72);
+      ball.velocity.set(
+        (catchPoint.x - ball.position.x) / flight,
+        (catchPoint.y - ball.position.y + 4.9 * flight * flight) / flight,
+        (catchPoint.z - ball.position.z) / flight,
+      );
+      lobPassActive = true;
+      preparePassReward(target, now, 'lob');
+      aiPassCooldown[owner] = 1.05;
+      aiDecisionCooldown[target] = 0.45;
+      showMessage(label, 760);
       return true;
     };
 
@@ -1187,12 +1243,18 @@ export default function Basketball3D() {
       const me = athletes[0];
       const forward = new THREE.Vector3(Math.sin(cameraYaw), 0, -Math.cos(cameraYaw));
       const mates = [1, 2].sort((a, b) => {
+        const callDifference = (offBallCallUntil[b] > performance.now() / 1000 ? offBallBonus[b] : 0)
+          - (offBallCallUntil[a] > performance.now() / 1000 ? offBallBonus[a] : 0);
+        if (Math.abs(callDifference) > 0.001) return callDifference;
         const da = athletes[a].position.clone().sub(me.position).normalize().dot(forward);
         const db = athletes[b].position.clone().sub(me.position).normalize().dot(forward);
         return db - da;
       });
       const target = mates[0];
-      return sendPass(0, target, '传球');
+      if (offBallCallUntil[target] > performance.now() / 1000 && offBallOpportunity[target] === 'lob') {
+        return sendLobPass(0, target, '抛向篮筐——空中接力！');
+      }
+      return sendPass(0, target, offBallCallUntil[target] > performance.now() / 1000 ? '回应战术要球！' : '快速传球');
     };
 
     const passOrCallForBall = () => {
@@ -1200,14 +1262,17 @@ export default function Basketball3D() {
       if (ball.owner === 0) { passBall(); return; }
       if (ball.owner !== null && athletes[ball.owner].team === 0) {
         const owner = ball.owner;
-        const nearestDefender = athletes.reduce((nearest, defender) => {
-          const defenderIndex = athletes.indexOf(defender);
-          if (!isActiveIndex(defenderIndex) || defender.team === 0) return nearest;
-          return Math.min(nearest, defender.position.distanceTo(athletes[0].position));
-        }, Infinity);
         const distance = athletes[owner].position.distanceTo(athletes[0].position);
         if (distance > 14.5) { showMessage('距离太远，先靠近队友', 750); return; }
-        sendPass(owner, 0, nearestDefender > 1.15 ? '队友回应要球！' : '有防守，注意接球！');
+        if (passLaneRisk(owner, 0) > 1.05) { showMessage('传球路线被封锁，继续跑位！', 750); return; }
+        const opportunity = readOffBallOpportunity(0);
+        if (opportunity.kind !== 'none') {
+          offBallOpportunity[0] = opportunity.kind; offBallBonus[0] = opportunity.bonus; offBallCallUntil[0] = performance.now() / 1000 + 0.9;
+        }
+        const label = opportunity.kind === 'three' ? '空位三分要球！'
+          : opportunity.kind === 'cut' || opportunity.kind === 'lob' ? '内切要球！'
+          : nearestDefenderDistance(0) > 1.15 ? '队友回应要球！' : '有防守，注意接球！';
+        sendPass(owner, 0, label);
         return;
       }
       showMessage(ball.owner === null ? '先争抢球权' : '防守回合无法要球', 650);
@@ -1474,12 +1539,28 @@ export default function Basketball3D() {
       };
     };
 
+    const readOffBallOpportunity = (playerIndex: number): { kind: OpportunityKind; bonus: number } => {
+      const player = athletes[playerIndex];
+      const rim = hoop(player.team).setY(0);
+      const rimDistance = horizontalDistance(player.position, rim);
+      const openness = nearestDefenderDistance(playerIndex);
+      if (rimDistance >= 6.7 && rimDistance <= 10.8 && openness > 1.55) return { kind: 'three', bonus: 0.1 };
+      const towardRim = rim.clone().sub(player.position).setY(0);
+      const planarVelocity = player.velocity.clone().setY(0);
+      const alignment = towardRim.lengthSq() > 0.01 && planarVelocity.lengthSq() > 0.2
+        ? towardRim.normalize().dot(planarVelocity.normalize())
+        : 0;
+      if (rimDistance < 3.4 && openness > 0.95 && alignment > 0.45) return { kind: 'lob', bonus: 0.09 };
+      if (rimDistance < 5.4 && openness > 1.05 && alignment > 0.38) return { kind: 'cut', bonus: 0.08 };
+      return { kind: 'none', bonus: 0 };
+    };
+
     const getTeamTactic = (team: Team, handler: number, now: number) => {
       if (modeRef.current !== '3v3') return null;
       const existing = teamTactics[team];
       if (existing && existing.handler === handler && now < existing.expiresAt) {
         const elapsed = now - existing.startedAt;
-        existing.phase = elapsed < 0.85 ? 'setup' : elapsed < 2.55 ? 'screen' : 'roll';
+        existing.phase = elapsed < 0.95 ? 'setup' : elapsed < 2.65 ? 'screen' : 'roll';
         return existing;
       }
       const mates = athletes
@@ -1490,17 +1571,90 @@ export default function Basketball3D() {
       const preferredScreener = mates.find((index) => index !== 0 && index % 3 === 2)
         ?? mates.find((index) => index !== 0)
         ?? mates[0];
+      const tacticKinds: TacticKind[] = ['pick-roll', 'flare', 'backdoor'];
+      const kind = tacticKinds[(Math.floor(now / 5.5) + team) % tacticKinds.length];
       const tactic: TeamTactic = {
+        kind,
         handler,
         screener: preferredScreener,
         spacer: mates.find((index) => index !== preferredScreener) ?? mates[0],
         side: ((Math.floor(now * 0.37) + team) % 2 ? -1 : 1) as -1 | 1,
         startedAt: now,
-        expiresAt: now + 5.6,
+        expiresAt: now + 6.2,
         phase: 'setup',
       };
       teamTactics[team] = tactic;
       return tactic;
+    };
+
+    const getOffBallPlan = (playerIndex: number, tactic: TeamTactic, owner: Athlete) => {
+      const player = athletes[playerIndex];
+      const attack = player.team === 0 ? 1 : -1;
+      const isScreener = playerIndex === tactic.screener;
+      const phase = tactic.phase;
+      const target = player.position.clone();
+      let speed = 0.94;
+      let opportunity: OpportunityKind = 'none';
+
+      if (tactic.kind === 'pick-roll') {
+        if (isScreener) {
+          if (phase === 'roll') {
+            target.set(attack * 17.05, 0, tactic.side * 0.62);
+            speed = 1.24; opportunity = 'lob';
+          } else {
+            const toRim = hoop(owner.team).setY(0).sub(owner.position).normalize();
+            const screenSide = new THREE.Vector3(-toRim.z, 0, toRim.x).multiplyScalar(tactic.side * 0.66);
+            target.copy(owner.position).addScaledVector(toRim, phase === 'setup' ? 1.9 : 1.45).add(screenSide);
+            speed = phase === 'screen' ? 0.78 : 1.02;
+          }
+        } else {
+          target.set(attack * (phase === 'roll' ? 12.4 : 13.45), 0, -tactic.side * (phase === 'roll' ? 5.45 : 6.55));
+          speed = 0.9; opportunity = 'three';
+        }
+      } else if (tactic.kind === 'flare') {
+        if (isScreener) {
+          target.set(attack * (phase === 'roll' ? 11.7 : 10.8), 0, -tactic.side * (phase === 'roll' ? 5.4 : 2.8));
+          speed = phase === 'screen' ? 0.8 : 0.98;
+          if (phase === 'roll') opportunity = 'three';
+        } else {
+          target.set(attack * (phase === 'setup' ? 10.7 : 13.55), 0, tactic.side * (phase === 'setup' ? 1.9 : 6.55));
+          speed = phase === 'setup' ? 0.92 : 1.18;
+          if (phase !== 'setup') opportunity = 'three';
+        }
+      } else if (isScreener) {
+        target.set(attack * 11.65, 0, -tactic.side * 5.75);
+        speed = 0.94; opportunity = 'three';
+      } else if (phase === 'roll') {
+        target.set(attack * 17.1, 0, tactic.side * 0.72);
+        speed = 1.28; opportunity = 'lob';
+      } else {
+        target.set(attack * (phase === 'setup' ? 13.5 : 12.25), 0, tactic.side * 6.15);
+        speed = phase === 'screen' ? 1.08 : 0.9;
+        if (phase === 'screen') opportunity = 'cut';
+      }
+      return { target, speed, opportunity };
+    };
+
+    const updateOffBallCall = (playerIndex: number, plannedKind: OpportunityKind, target: THREE.Vector3, now: number) => {
+      const player = athletes[playerIndex];
+      const nearTarget = horizontalDistance(player.position, target) < (plannedKind === 'lob' ? 1.55 : 1.05);
+      if (!nearTarget || plannedKind === 'none' || offBallCallCooldown[playerIndex] > 0) return;
+      const read = readOffBallOpportunity(playerIndex);
+      const kind = plannedKind === 'three'
+        ? read.kind === 'three' ? 'three' : 'none'
+        : plannedKind === 'lob' && horizontalDistance(player.position, hoop(player.team).setY(0)) < 3.8
+          ? nearestDefenderDistance(playerIndex) > 0.9 ? 'lob' : 'cut'
+          : read.kind === 'lob' ? 'lob' : read.kind === 'cut' ? 'cut' : 'none';
+      if (kind === 'none') return;
+      offBallOpportunity[playerIndex] = kind;
+      offBallBonus[playerIndex] = kind === 'three' ? 0.1 : kind === 'lob' ? 0.09 : 0.08;
+      offBallCallUntil[playerIndex] = now + 0.95;
+      offBallCallCooldown[playerIndex] = 1.45;
+      if (now >= tacticCallMessageAt) {
+        tacticCallMessageAt = now + 0.85;
+        const sideLabel = player.team === 0 ? '队友' : '对手';
+        showMessage(`${sideLabel}${kind === 'three' ? '外弹空位要球！' : kind === 'lob' ? '顺下呼叫空接！' : '内切要球！'}`, 620);
+      }
     };
 
     const defensiveAssignments = (defendingTeam: Team, offensiveFocus: number) => {
@@ -1546,7 +1700,10 @@ export default function Basketball3D() {
         const laneRisk = passLaneRisk(owner, index);
         const rimDistance = horizontalDistance(mate.position, hoop(mate.team).setY(0));
         const finishingBonus = rimDistance < 4.2 && openness > 1.25 ? 1.15 : 0;
-        const score = openness * 1.35 + advance * 0.16 - laneRisk * 2.15 - Math.max(0, passDistance - 9) * 0.12 + finishingBonus + (index === 0 ? 0.18 : 0);
+        const callingBonus = offBallCallUntil[index] > performance.now() / 1000
+          ? offBallOpportunity[index] === 'three' ? 3.1 : offBallOpportunity[index] === 'lob' ? 3.5 : 2.55
+          : 0;
+        const score = openness * 1.35 + advance * 0.16 - laneRisk * 2.15 - Math.max(0, passDistance - 9) * 0.12 + finishingBonus + callingBonus + (index === 0 ? 0.18 : 0);
         return score > best.score ? { index, score } : best;
       }, { index: -1, score: -Infinity });
     };
@@ -1579,29 +1736,29 @@ export default function Basketball3D() {
       return true;
     };
 
-    const startAiDunk = (owner: number, putback = false) => {
+    const startAiDunk = (owner: number, putback = false, alleyOop = false) => {
       const player = athletes[owner];
       if (owner === 0 || (putback ? ball.owner !== null : ball.owner !== owner)) return false;
       const rim = hoop(player.team);
       const rimGround = rim.clone().setY(0);
-      if (player.position.distanceTo(rimGround) > (putback ? 2.8 : 2.45)) return false;
+      if (player.position.distanceTo(rimGround) > (alleyOop ? 3.6 : putback ? 2.8 : 2.45)) return false;
       const coneRead = readShotCone(owner, 2.35, Math.PI * 0.28);
-      player.jumpV = Math.max(player.jumpV, putback ? 7.9 : 7.45);
-      player.action = putback ? 1.28 : 1.18;
+      player.jumpV = Math.max(player.jumpV, alleyOop ? 8.15 : putback ? 7.9 : 7.45);
+      player.action = alleyOop ? 1.34 : putback ? 1.28 : 1.18;
       player.actionKind = 'dunk';
       facePoint(player, rim);
-      ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = putback ? 0.4 : 0.5; ball.shotPoints = 2; ball.scored = false;
+      ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = alleyOop ? 0.42 : putback ? 0.4 : 0.5; ball.shotPoints = 2; ball.scored = false;
       const contactPenalty = contactPressure[owner] * 0.18;
-      const chance = clamp((putback ? 0.68 : 0.91) + (coneRead.defendersInCone === 0 ? 0.05 : 0) - coneRead.contestStrength * (putback ? 0.5 : 0.62) - contactPenalty, 0.01, 0.98);
+      const chance = clamp((alleyOop ? 0.84 : putback ? 0.68 : 0.91) + (coneRead.defendersInCone === 0 ? 0.05 : 0) - coneRead.contestStrength * (putback ? 0.5 : 0.62) - contactPenalty, 0.01, 0.98);
       ball.shotMake = Math.random() < chance;
-      const from = getHandPosition(player, 'right');
+      const from = alleyOop ? ball.position.clone() : getHandPosition(player, 'right');
       ball.position.copy(from);
       const t = ball.shotFlight;
       const aim = rim.clone();
       if (!ball.shotMake) aim.z += (Math.random() > 0.5 ? 1 : -1) * 0.82;
       ball.velocity.set((aim.x - from.x) / t, (aim.y - from.y + 4.9 * t * t) / t, (aim.z - from.z) / t);
       aiDecisionCooldown[owner] = 1.25;
-      showMessage(`${putback ? 'AI补扣' : coneRead.defendersInCone === 0 ? 'AI无人防守扣篮' : 'AI强行扣篮'} · ${Math.round(chance * 100)}%`, 850);
+      showMessage(`${alleyOop ? '空中接力终结' : putback ? 'AI补扣' : coneRead.defendersInCone === 0 ? 'AI无人防守扣篮' : 'AI强行扣篮'} · ${Math.round(chance * 100)}%`, 850);
       return true;
     };
 
@@ -1621,7 +1778,7 @@ export default function Basketball3D() {
         hitBoundary = true;
       }
       if (hitBoundary && (ball.mode === 'shot' || ball.mode === 'pass')) {
-        ball.mode = 'loose'; ball.passTarget = null; ball.shotMake = false; ball.shotAge = 0;
+        ball.mode = 'loose'; ball.passTarget = null; ball.shotMake = false; ball.shotAge = 0; lobPassActive = false; pendingPassReward = null;
       }
     };
 
@@ -1723,6 +1880,8 @@ export default function Basketball3D() {
         ball.passTarget = null;
         ball.shotMake = false;
         ball.shotAge = 0;
+        lobPassActive = false;
+        pendingPassReward = null;
       }
     };
 
@@ -1972,18 +2131,32 @@ export default function Basketball3D() {
       } else if (ball.mode === 'pass') {
         const previous = ball.position.clone();
         ball.shotAge += dt;
+        if (lobPassActive) ball.velocity.y -= 9.8 * dt;
         ball.position.addScaledVector(ball.velocity, dt);
         ball.group.rotation.x += dt * 14;
         keepBallOnCourt();
         if (ball.passTarget !== null) {
           const target = athletes[ball.passTarget];
-          if (ball.position.distanceTo(target.position.clone().add(new THREE.Vector3(0, 1.1, 0))) < 1.05) {
-            ball.owner = ball.passTarget; ball.lastOwner = ball.passTarget; ball.mode = 'held'; ball.passTarget = null;
+          const catchHeight = lobPassActive ? 2.45 + target.jump : 1.1 + target.jump;
+          if (ball.position.distanceTo(target.position.clone().add(new THREE.Vector3(0, catchHeight, 0))) < (lobPassActive ? 1.3 : 1.05)) {
+            const receiver = ball.passTarget;
+            const completedLob = lobPassActive;
+            ball.owner = receiver; ball.lastOwner = receiver; ball.mode = 'held'; ball.passTarget = null; lobPassActive = false;
+            if (pendingPassReward?.receiver === receiver && pendingPassReward.expiresAt >= now) {
+              assistedShotBonus[receiver] = pendingPassReward.bonus;
+              assistedShotUntil[receiver] = now + 2.6;
+              if (!completedLob) showMessage(`战术传球成功 · 命中加成 +${Math.round(pendingPassReward.bonus * 100)}%`, 900);
+            }
+            pendingPassReward = null;
+            if (completedLob && receiver !== 0) {
+              target.jumpV = Math.max(target.jumpV, 7.8);
+              startAiDunk(receiver, false, true);
+            }
           } else {
             const passingTeam = athletes[ball.lastOwner].team;
             athletes.forEach((player, index) => {
               if (isActiveIndex(index) && ball.mode === 'pass' && player.team !== passingTeam && player.position.distanceTo(ball.position) < 0.8 && Math.random() < dt * 3) {
-                ball.owner = index; ball.lastOwner = index; ball.mode = 'held'; ball.passTarget = null; showMessage('传球被断');
+                ball.owner = index; ball.lastOwner = index; ball.mode = 'held'; ball.passTarget = null; lobPassActive = false; pendingPassReward = null; showMessage('传球被断');
               }
             });
           }
@@ -2168,6 +2341,7 @@ export default function Basketball3D() {
         aiDecisionCooldown[index] = Math.max(0, aiDecisionCooldown[index] - dt);
         aiPassCooldown[index] = Math.max(0, aiPassCooldown[index] - dt);
         aiShotCooldown[index] = Math.max(0, aiShotCooldown[index] - dt);
+        offBallCallCooldown[index] = Math.max(0, offBallCallCooldown[index] - dt);
         if (aiShotPlans[index] && ball.owner !== index) aiShotPlans[index] = null;
         if (!isActiveIndex(index)) { player.velocity.set(0, 0, 0); return; }
         if (index === 0) return;
@@ -2196,19 +2370,42 @@ export default function Basketball3D() {
           const underPressure = defenderDistance < 1.45;
           const plannedShot = aiShotPlans[index];
           if (plannedShot) {
-            player.velocity.multiplyScalar(0.18);
-            facePoint(player, rim);
+            if (plannedShot.style === 'normal') player.velocity.multiplyScalar(0.18);
+            else moveToward(player, plannedShot.landing, PLAYER_RUN_SPEED * 0.92, dt, rim);
             player.action = Math.max(player.action, 0.38);
             player.actionKind = 'shoot';
             if (now >= plannedShot.releaseAt) {
               aiShotPlans[index] = null;
-              releaseShot(index, plannedShot.power);
+              releaseShot(index, plannedShot.power, plannedShot.style);
               aiShotCooldown[index] = 1.45;
             }
             return;
           }
           if (aiDecisionCooldown[index] <= 0) {
             aiDecisionCooldown[index] = 0.26 + Math.random() * 0.2;
+            const callingTarget = athletes
+              .map((mate, mateIndex) => ({ mate, mateIndex }))
+              .filter(({ mate, mateIndex }) => isActiveIndex(mateIndex) && mate.team === player.team && mateIndex !== index && offBallCallUntil[mateIndex] > now)
+              .sort((a, b) => offBallBonus[b.mateIndex] - offBallBonus[a.mateIndex])[0]?.mateIndex ?? -1;
+            if (callingTarget >= 0 && aiPassCooldown[index] <= 0) {
+              const kind = offBallOpportunity[callingTarget];
+              const laneRisk = passLaneRisk(index, callingTarget);
+              const delivered = kind === 'lob'
+                ? sendLobPass(index, callingTarget, player.team === 0 ? '队友送出空接！' : '对手空中连线！')
+                : laneRisk < (kind === 'three' ? 0.82 : 0.95)
+                  && sendPass(index, callingTarget, kind === 'three' ? '找到外线空位！' : '内切传球！');
+              if (delivered) return;
+            }
+            const assistedCatchAndShoot = assistedShotUntil[index] > now
+              && defenderDistance > 1.45 && distanceToRim >= 4.2 && distanceToRim <= 10.8;
+            if (assistedCatchAndShoot && aiShotCooldown[index] <= 0) {
+              const catchPower = clamp(0.54 + distanceToRim * 0.012, 0.58, 0.82);
+              player.velocity.set(0, 0, 0);
+              player.action = 0.5; player.actionKind = 'shoot';
+              aiShotPlans[index] = { releaseAt: now + 0.42, power: catchPower, style: 'normal', landing: player.position.clone() };
+              showMessage(player.team === 0 ? '队友接球就投！' : '对手战术接球三分！', 720);
+              return;
+            }
             const bestPass = bestAiPassTarget(index);
             const bestPassOpen = bestPass.index >= 0 ? nearestDefenderDistance(bestPass.index) : 0;
             const rollerOpen = tactic?.phase === 'roll'
@@ -2240,7 +2437,8 @@ export default function Basketball3D() {
 
             const canFinishLane = distanceToRim < 4.15 && laneRead.nearestAhead > 0.95 && laneRead.pressure < 0.9;
             if (aiShotCooldown[index] <= 0 && canFinishLane && Math.random() < (laneRead.clear ? 0.9 : 0.58)) {
-              if (startAiLayup(index, laneRead.pressure)) { aiShotCooldown[index] = 1.28; return; }
+              const acrobatic = laneRead.pressure > 0.42 && Math.random() < 0.55;
+              if (startAiLayup(index, laneRead.pressure, acrobatic)) { aiShotCooldown[index] = 1.28; return; }
             }
 
             const openShot = defenderDistance > (distanceToRim > 7 ? 1.75 : 1.5);
@@ -2257,9 +2455,22 @@ export default function Basketball3D() {
                 releaseShot(index, idealPower);
                 aiShotCooldown[index] = 1.35;
               } else {
+                const towardRim = rim.clone().sub(player.position).normalize();
+                const lateral = new THREE.Vector3(-towardRim.z, 0, towardRim.x);
+                const style: ShotStyle = defenderDistance < 2.35
+                  ? Math.random() < 0.42 ? 'fade' : Math.random() < 0.5 ? 'step-left' : 'step-right'
+                  : Math.random() < 0.18 ? (Math.random() < 0.5 ? 'step-left' : 'step-right') : 'normal';
+                const landing = player.position.clone();
+                if (style === 'fade') landing.addScaledVector(towardRim, -0.78);
+                if (style === 'step-left') landing.addScaledVector(lateral, -0.92);
+                if (style === 'step-right') landing.addScaledVector(lateral, 0.92);
+                if (style !== 'normal') {
+                  separationMoveUntil[index] = now + 0.9;
+                  showMessage(style === 'fade' ? 'AI后仰跳投！' : 'AI横撤步跳投！', 650);
+                }
                 player.velocity.set(0, 0, 0);
                 player.action = 0.52; player.actionKind = 'shoot';
-                aiShotPlans[index] = { releaseAt: now + 0.4, power: idealPower };
+                aiShotPlans[index] = { releaseAt: now + (style === 'normal' ? 0.4 : 0.48), power: idealPower, style, landing };
               }
               return;
             }
@@ -2268,7 +2479,11 @@ export default function Basketball3D() {
             : player.moveKind === 'cross-right' || player.moveKind === 'burst-right' || player.moveKind === 'spin-right' ? 1
             : index % 2 ? -1 : 1;
           let driveTarget: THREE.Vector3;
-          if (tactic?.phase === 'setup') {
+          if (tactic?.kind === 'flare' && tactic.phase !== 'roll') {
+            driveTarget = new THREE.Vector3(attack * 9.8, 0, -tactic.side * 1.35);
+          } else if (tactic?.kind === 'backdoor' && tactic.phase !== 'roll') {
+            driveTarget = new THREE.Vector3(attack * 10.7, 0, -tactic.side * 3.1);
+          } else if (tactic?.phase === 'setup') {
             driveTarget = new THREE.Vector3(attack * 10.1, 0, -tactic.side * 0.75);
           } else if (tactic?.phase === 'screen') {
             driveTarget = new THREE.Vector3(clamp(player.position.x + attack * 2.8, -16.1, 16.1), 0, tactic.side * 2.65);
@@ -2287,30 +2502,11 @@ export default function Basketball3D() {
             const ownerIndex = ball.owner ?? ball.lastOwner;
             const owner = athletes[ownerIndex];
             const tactic = getTeamTactic(player.team, ownerIndex, now);
-            let target: THREE.Vector3;
-            let tacticalSpeed = 0.96;
-            if (tactic && index === tactic.screener) {
-              if (tactic.phase === 'roll') {
-                target = new THREE.Vector3(attack * 16.65, 0, tactic.side * 0.72);
-                tacticalSpeed = 1.18;
-              } else {
-                const toRim = hoop(owner.team).setY(0).sub(owner.position).normalize();
-                const sideStep = new THREE.Vector3(-toRim.z, 0, toRim.x).multiplyScalar(tactic.side * 0.38);
-                target = owner.position.clone().addScaledVector(toRim, 1.55).add(sideStep);
-                tacticalSpeed = tactic.phase === 'screen' ? 0.82 : 1.04;
-              }
-            } else if (tactic && index === tactic.spacer) {
-              const overplayed = nearestDefenderDistance(index) < 1.05;
-              const backdoorCut = tactic.phase === 'roll' && overplayed && horizontalDistance(owner.position, hoop(owner.team).setY(0)) > 5.6;
-              target = backdoorCut
-                ? new THREE.Vector3(attack * 16.15, 0, -tactic.side * 1.15)
-                : new THREE.Vector3(attack * 13.5, 0, -tactic.side * 6.25);
-              tacticalSpeed = backdoorCut ? 1.2 : 0.9;
-            } else {
-              target = new THREE.Vector3(attack * 12.4, 0, index % 2 ? -5.8 : 5.8);
-            }
-            const shouldTrackBall = tacticalSpeed <= 1.05;
-            moveToward(player, target, PLAYER_RUN_SPEED * tacticalSpeed, dt, shouldTrackBall ? owner.position : undefined);
+            const fallback = { target: new THREE.Vector3(attack * 12.4, 0, index % 2 ? -5.9 : 5.9), speed: 0.94, opportunity: 'three' as OpportunityKind };
+            const plan = tactic ? getOffBallPlan(index, tactic, owner) : fallback;
+            updateOffBallCall(index, plan.opportunity, plan.target, now);
+            const shouldTrackBall = plan.speed <= 1.05;
+            moveToward(player, plan.target, PLAYER_RUN_SPEED * plan.speed, dt, shouldTrackBall ? owner.position : undefined);
           }
         } else if (possession !== null) {
           const markIndex = defensiveMaps[player.team].get(index);
@@ -2323,13 +2519,17 @@ export default function Basketball3D() {
             const carrier = athletes[ball.owner];
             const carrierLane = readDrivingLane(ball.owner);
             const carrierNearRim = horizontalDistance(carrier.position, hoop(carrier.team).setY(0)) < 4.8;
-            const canHelpAndRecover = horizontalDistance(mark.position, carrier.position) < 5.2;
+            const designatedHelper = index % 3 === 2;
+            const canHelpAndRecover = designatedHelper && horizontalDistance(mark.position, carrier.position) < 5.2;
             if (carrierNearRim && carrierLane.pressure < 0.75 && canHelpAndRecover) target.lerp(carrier.position, 0.22);
           }
           const offenseTactic = teamTactics[mark.team];
-          const hittingScreen = onBall && offenseTactic?.phase === 'screen'
-            && horizontalDistance(player.position, athletes[offenseTactic.screener].position) < 1.02;
-          moveToward(player, target, PLAYER_RUN_SPEED * (hittingScreen ? 0.66 : onBall ? 1.08 : 0.98), dt, mark.position);
+          const nearScreen = offenseTactic
+            && horizontalDistance(player.position, athletes[offenseTactic.screener].position) < 1.24;
+          const hittingOnBallScreen = onBall && offenseTactic?.kind === 'pick-roll' && offenseTactic.phase === 'screen' && nearScreen;
+          const hittingFlareScreen = markIndex === offenseTactic?.spacer && offenseTactic.kind === 'flare' && offenseTactic.phase === 'screen' && nearScreen;
+          const screenSpeed = hittingFlareScreen ? 0.48 : hittingOnBallScreen ? 0.62 : onBall ? 1.08 : 0.98;
+          moveToward(player, target, PLAYER_RUN_SPEED * screenSpeed, dt, mark.position);
           const reachDistance = horizontalDistance(player.position, mark.position);
           const shootingThreat = ball.owner === markIndex
             && ((mark.actionKind === 'shoot' || mark.actionKind === 'layup' || mark.actionKind === 'acrobatic-layup') && mark.action > 0.15
