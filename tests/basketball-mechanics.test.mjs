@@ -17,12 +17,13 @@ function visit(node) {
 visit(ast);
 assert.equal(callbacks.length, names.length);
 const constants = source.slice(source.indexOf('const COLORS'), source.indexOf('export default function'));
-const code = ts.transpileModule(`${constants}\n${callbacks.join('\n')}\nglobalThis.api = { ${names.join(',')} };`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
+const physics = readFileSync(new URL('../lib/basketball-physics.ts', import.meta.url), 'utf8').replace(/^import .*;$/mg, '').replace(/export /g, '');
+const code = ts.transpileModule(`${physics}\n${constants}\n${callbacks.join('\n')}\nglobalThis.api = { ${names.join(',')} };`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
 
 function harness() {
   const athletes = Array.from({length: 6}, (_, i) => ({team: i < 3 ? 0 : 1, stamina: 1, position: new THREE.Vector3(18, 0, 0), jump: 0, jumpV: 0, action: 0, actionKind: 'idle'}));
   const state = {
-    THREE, Math, performance: {now: () => 10000}, athletes,
+    THREE, Math, ballSpin: new THREE.Vector3(), performance: {now: () => 10000}, athletes,
     ball: {owner: null, mode: 'shot', scored: false, shotMake: true, lastOwner: 0, shotPoints: 2, position: new THREE.Vector3(), velocity: new THREE.Vector3()},
     hoop: team => new THREE.Vector3(team === 0 ? 18.7 : -18.7, 3.05, 0),
     horizontalDistance: (a, b) => Math.hypot(a.x - b.x, a.z - b.z),

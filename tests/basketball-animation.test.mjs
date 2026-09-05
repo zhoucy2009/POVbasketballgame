@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+import vm from 'node:vm';
+import ts from 'typescript';
+import * as THREE from 'three';
+const source = readFileSync(new URL('../lib/basketball-animation.ts', import.meta.url), 'utf8').replace(/^import .*;$/mg, '').replace(/export /g, '');
+const context = vm.createContext({ THREE });
+vm.runInContext(ts.transpileModule(source + '\nglobalThis.closeMotionLoop = closeMotionLoop;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+test('loop stitching preserves the action body and closes normalized rotation and position seams', () => {
+  const rotation = new THREE.QuaternionKeyframeTrack('Hips.quaternion', [0, 0.5, 0.95, 1], [0,0,0,1, 0,0.70710678,0,0.70710678, 0,1,0,0, 0,1,0,0]);
+  const position = new THREE.VectorKeyframeTrack('Hips.position', [0, 0.5, 0.95, 1], [0,1,0, 0,1.1,0, 0,1.2,0, 0,1.3,0]);
+  const clip = new THREE.AnimationClip('Run_Loop', 1, [rotation, position]);
+  const midpoint = Array.from(rotation.values.slice(4, 8));
+  context.closeMotionLoop(clip);
+  assert.deepEqual(Array.from(rotation.values.slice(4, 8)), midpoint);
+  assert.deepEqual(Array.from(rotation.values.slice(-4)), Array.from(rotation.values.slice(0, 4)));
+  assert.deepEqual(Array.from(position.values.slice(-3)), Array.from(position.values.slice(0, 3)));
+  assert.ok(Math.abs(new THREE.Quaternion().fromArray(rotation.values, 8).length() - 1) < 1e-6);
+});
