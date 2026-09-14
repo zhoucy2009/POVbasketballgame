@@ -33,19 +33,19 @@ function sign(parent: THREE.Object3D, text: string, subtitle: string, p: [number
 
 /** Shared batches give each fan a face, clothes and footwear without a draw call per part. */
 function crowd(parent: THREE.Group, seats: THREE.Vector3[], theme: CourtTheme) {
-  const animals = theme === 'forest', count = seats.length;
+  const animals = theme === 'forest', count = seats.length, distant = theme === 'hall';
   const batch = (geometry: THREE.BufferGeometry, n: number, color = '#ffffff') => {
     const mesh = new THREE.InstancedMesh(geometry, material(color), n);
     mesh.frustumCulled = false; parent.add(mesh); return mesh;
   };
-  const body = batch(new THREE.CapsuleGeometry(0.19, 0.34, 5, 12), count);
-  const heads = batch(new THREE.SphereGeometry(0.17, 16, 12), count);
-  const limbs = batch(new THREE.CapsuleGeometry(0.055, 0.32, 4, 8), count * 4);
+  const body = batch(new THREE.CapsuleGeometry(0.19, 0.34, distant ? 3 : 5, distant ? 10 : 12), count);
+  const heads = batch(new THREE.SphereGeometry(0.17, distant ? 12 : 16, distant ? 8 : 12), count);
+  const limbs = batch(new THREE.CapsuleGeometry(0.055, 0.32, distant ? 2 : 4, 8), count * 4);
   const shoes = batch(new THREE.SphereGeometry(1, 12, 8), count * 2);
   const eyes = batch(new THREE.SphereGeometry(0.022, 8, 6), count * 2, '#1e1923');
   const glints = batch(new THREE.SphereGeometry(0.008, 6, 4), count * 2, '#fff7ea');
   const noses = batch(new THREE.SphereGeometry(1, 10, 8), count);
-  const hair = animals ? null : batch(new THREE.SphereGeometry(1, 14, 10), count);
+  const hair = animals ? null : batch(new THREE.SphereGeometry(1, distant ? 10 : 14, distant ? 6 : 10), count);
   const hats = !animals ? batch(new THREE.SphereGeometry(1, 12, 8), count) : null;
   const ears = animals ? batch(new THREE.SphereGeometry(1, 12, 8), count * 2) : null;
   const innerEars = animals ? batch(new THREE.SphereGeometry(1, 10, 8), count * 2, '#dea59c') : null;
@@ -57,7 +57,7 @@ function crowd(parent: THREE.Group, seats: THREE.Vector3[], theme: CourtTheme) {
     : ['#df6651', '#487f99', '#d3a447', '#ded9c7', '#514d7e'];
   const skins = animals ? ['#aa7246', '#d48a46', '#9ca8ad', '#e5d6bc'] : ['#bd8d66', '#82583f', '#dba985', '#a87453'];
   const obj = new THREE.Object3D(), yAxis = new THREE.Vector3(0, 1, 0), tint = new THREE.Color();
-  const rotations = seats.map(p => p.z < 0 ? 0 : Math.PI);
+  const rotations = seats.map(p => theme === 'hall' && Math.abs(p.x) > 23 && Math.abs(p.z) < 12 ? Math.atan2(-p.x, -p.z) : p.z < 0 ? 0 : Math.PI);
   const put = (mesh: THREE.InstancedMesh, j: number, i: number, x: number, y: number, z: number, scale: [number, number, number] = [1, 1, 1], tilt = 0) => {
     obj.position.set(x, y, z).applyAxisAngle(yAxis, rotations[i]).add(seats[i]);
     obj.rotation.set(0, rotations[i], tilt); obj.scale.set(...scale); obj.updateMatrix(); mesh.setMatrixAt(j, obj.matrix);
@@ -293,11 +293,124 @@ function urbanDetails(group: THREE.Group) {
   }
 }
 
+/** Streets stay inland so the eastern ocean horizon remains open. */
+function coastalTown(group: THREE.Group) {
+  const asphalt = material('#454052'), sidewalk = material('#aa9dba');
+  const ivory = material('#eadbc9'), trim = material('#746b8d'), roof = material('#64526f');
+  const facades = ['#b9c6cb', '#d4a095', '#d6c5a1', '#a9bbad'].map(c => material(c));
+  const glass = material('#5c668e', { metalness: 0.45, roughness: 0.28 });
+  const warmGlass = material('#f0bf88', { emissive: '#efb177', emissiveIntensity: 0.45 });
+  box(group, [8, 0.12, 110], [-39, -0.14, 0], asphalt);
+  for (const z of [-30, 30]) {
+    box(group, [63, 0.12, 7], [-10, -0.14, z], asphalt);
+    for (const edge of [-1, 1]) box(group, [63, 0.18, 1.4], [-10, -0.08, z + edge * 4.1], sidewalk);
+    for (let x = -37; x < 21; x += 5) box(group, [2.4, 0.015, 0.08], [x, -0.07, z], ivory);
+    for (let i = 0; i < 7; i++) {
+      const x = -32 + i * 7.8, h = 4.7 + i % 3 * 1.7, back = z < 0 ? -1 : 1;
+      const house = new THREE.Group(); house.position.set(x, 0, z + back * 10); house.rotation.y = z > 0 ? Math.PI : 0; group.add(house);
+      box(house, [6.6, h, 5.3], [0, h / 2, 0], facades[i % 4]);
+      // Horizontal clapboard siding, a pitched roof and a deep front porch.
+      for (let y = 0.5; y < h; y += 0.48) box(house, [6.65, 0.035, 0.025], [0, y, 2.67], ivory);
+      for (const side of [-1, 1]) {
+        const panel = box(house, [3.85, 0.18, 6.2], [side * 1.65, h + 0.6, 0], roof); panel.rotation.z = -side * 0.35;
+        box(house, [0.13, 2.5, 0.13], [side * 2.8, 1.25, 3.35], ivory);
+      }
+      box(house, [6.8, 0.14, 1.4], [0, 2.6, 3.1], trim);
+      box(house, [6.8, 0.24, 1.5], [0, 0.08, 3.1], sidewalk);
+      box(house, [0.85, 2.1, 0.06], [0, 1.1, 2.69], trim);
+      for (const wx of [-2, 2]) for (let y = 1.5; y < h - 0.5; y += 2.1) {
+        box(house, [1.35, 1.3, 0.08], [wx, y, 2.7], ivory);
+        box(house, [1.15, 1.1, 0.04], [wx, y, 2.76], i % 3 ? glass : warmGlass);
+        box(house, [0.045, 1.15, 0.055], [wx, y, 2.79], ivory);
+      }
+      if (i === 2 || i === 5) sign(house, i === 2 ? 'SURFSIDE DINER' : 'PALM MOTEL', i === 2 ? 'BURGERS  /  SHAKES' : 'VACANCY  /  OCEAN DRIVE', [0, h - 0.3, 2.85], 5.7, 1.35, '#f3b59d');
+    }
+  }
+  // Cars use a sculpted cabin, separate glazing, wheels, lamps and chrome bumpers.
+  const tires = material('#252534'), chrome = material('#c3c3d1', { metalness: 0.8, roughness: 0.25 });
+  const paint = ['#be727e', '#a7bbc2', '#e4c087', '#748795', '#e4d7c4'].map(c => material(c, { metalness: 0.3, roughness: 0.32 }));
+  for (let i = 0; i < 12; i++) {
+    const car = new THREE.Group(); car.position.set(-31 + i % 6 * 8.6, 0, i < 6 ? -27.6 : 27.6); car.rotation.y = i < 6 ? Math.PI / 2 : -Math.PI / 2; group.add(car);
+    box(car, [1.8, 0.52, 4.3], [0, 0.68, 0], paint[i % 5]);
+    const cabin = box(car, [1.55, 0.67, i % 4 === 0 ? 1.6 : 2.2], [0, 1.23, -0.12], glass);
+    box(car, [1.6, 0.12, i % 4 === 0 ? 1.7 : 2.3], [0, 1.58, -0.12], paint[i % 5]);
+    box(car, [1.65, 0.16, 0.95], [0, 0.99, 1.5], paint[i % 5]);
+    for (const side of [-1, 1]) {
+      box(car, [1.85, 0.13, 0.12], [0, 0.52, side * 2.16], chrome);
+      for (const wx of [-0.63, 0.63]) box(car, [0.38, 0.2, 0.04], [wx, 0.8, side * 2.17], side > 0 ? warmGlass : paint[0]);
+      box(car, [0.06, 0.7, 0.09], [side * 0.8, 1.24, -0.12], paint[i % 5]);
+      for (const wz of [-1.35, 1.35]) {
+        const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.36, 0.23, 14), tires); wheel.rotation.z = Math.PI / 2; wheel.position.set(side * 0.92, 0.4, wz); car.add(wheel);
+        const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 0.25, 10), chrome); hub.rotation.z = Math.PI / 2; hub.position.copy(wheel.position); car.add(hub);
+      }
+    }
+    cabin.castShadow = true;
+  }
+  for (const z of [-25.5, 25.5]) for (const x of [-27, -11, 5, 19]) {
+    branch(group, new THREE.Vector3(x, 0, z), new THREE.Vector3(x, 5, z), 0.055, trim);
+    box(group, [0.6, 0.13, 0.35], [x, 5, z], ivory);
+    box(group, [0.52, 0.045, 0.28], [x, 4.91, z], warmGlass);
+  }
+}
+
+function coastalClouds(group: THREE.Group) {
+  const shadow = material('#a08eaf', { roughness: 1, emissive: '#66517b', emissiveIntensity: 0.25 });
+  const pink = material('#d6b4c3', { roughness: 1, emissive: '#b984aa', emissiveIntensity: 0.2 });
+  for (let i = 0; i < 12; i++) {
+    const a = i * 2.399, x = Math.cos(a) * (62 + i % 3 * 7), z = Math.sin(a) * (56 + i % 4 * 5), y = 16 + i % 4 * 4;
+    for (let j = 0; j < 6; j++) ellipsoid(group, [3.6 + j % 3, 0.75 + j % 2 * 0.6, 2.1 + j % 3 * 0.3], [x + (j - 2.5) * 2.8, y + Math.sin(j * 1.9) * 0.6, z + Math.cos(j) * 1.5], j % 3 ? pink : shadow);
+  }
+}
+
+/** Several staggered rings fill the gaps behind the hero trees in five instanced batches. */
+function forestDepth(group: THREE.Group) {
+  const count = 144, trunks = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.28, 0.6, 1, 9), material('#4b5344'), count);
+  const colors = ['#365a4b', '#426953', '#50775c'];
+  const crowns = colors.map(color => new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 2), foliageMaterial(color), count));
+  const pine = new THREE.InstancedMesh(new THREE.ConeGeometry(1, 1, 10), material('#284c40'), count);
+  const obj = new THREE.Object3D();
+  for (let i = 0; i < count; i++) {
+    const ring = Math.floor(i / 48), a = i * 2.39996, x = Math.cos(a) * (39 + ring * 13 + i % 3), z = Math.sin(a) * (29 + ring * 10 + i % 4);
+    const h = 11 + i % 7 * 2;
+    obj.position.set(x, h / 2, z); obj.scale.set(1 + i % 3 * 0.3, h, 1 + i % 3 * 0.3); obj.rotation.set(0, a, 0); obj.updateMatrix(); trunks.setMatrixAt(i, obj.matrix);
+    crowns.forEach((mesh, j) => {
+      obj.position.set(x + Math.sin(j * 2.1) * 1.4, h - 1 + j * 1.1, z + Math.cos(j * 2.1));
+      obj.scale.set(2.6 + i % 3 * 0.4, 2 + j * 0.5, 2.4 + i % 4 * 0.25); obj.updateMatrix(); mesh.setMatrixAt(i, obj.matrix);
+    });
+    obj.position.set(x, h + 2.8, z); obj.scale.set(i % 3 === 0 ? 2.5 : 0, i % 3 === 0 ? 7 : 0, i % 3 === 0 ? 2.5 : 0); obj.updateMatrix(); pine.setMatrixAt(i, obj.matrix);
+  }
+  [trunks, ...crowns, pine].forEach(mesh => { mesh.receiveShadow = true; group.add(mesh); });
+}
+
+function modernSkyline(group: THREE.Group) {
+  const glass = ['#536f89', '#69849c', '#40596e', '#81939f'].map(c => material(c, { metalness: 0.5, roughness: 0.3 }));
+  const steel = material('#bcc5cb', { metalness: 0.55, roughness: 0.4 }), dark = material('#253c52');
+  const windows = new THREE.InstancedMesh(new THREE.BoxGeometry(0.8, 1.25, 0.035), material('#c4d5de', { emissive: '#92a8bc', emissiveIntensity: 0.16, metalness: 0.35 }), 6000);
+  const obj = new THREE.Object3D(); let n = 0;
+  for (let i = 0; i < 26; i++) {
+    const a = i * Math.PI * 2 / 26, x = Math.cos(a) * (47 + i % 3 * 9), z = Math.sin(a) * (39 + i % 2 * 12), h = 17 + i % 6 * 5, w = 5.8 + i % 3;
+    box(group, [w, h, 6.2], [x, h / 2 - 0.2, z], glass[i % 4]);
+    box(group, [w + 0.35, 0.35, 6.55], [x, h, z], steel);
+    if (i % 4 === 0) {
+      box(group, [w * 0.65, 4, 4.5], [x, h + 2, z], glass[(i + 1) % 4]);
+      branch(group, new THREE.Vector3(x, h + 4, z), new THREE.Vector3(x, h + 10, z), 0.07, steel);
+    }
+    for (let y = 2; y < h - 1; y += 2.5) {
+      box(group, [w + 0.03, 0.06, 6.24], [x, y - 1, z], dark);
+      for (const side of [-1, 1]) for (let col = 0; col < 4; col++) {
+        obj.position.set(x - w * 0.35 + col * w * 0.23, y, z + side * 3.13); obj.rotation.set(0, side < 0 ? Math.PI : 0, 0); obj.updateMatrix(); windows.setMatrixAt(n++, obj.matrix);
+        obj.position.set(x + side * (w / 2 + 0.03), y, z - 2.1 + col * 1.4); obj.rotation.y = side * Math.PI / 2; obj.updateMatrix(); windows.setMatrixAt(n++, obj.matrix);
+      }
+    }
+  }
+  windows.count = n; group.add(windows);
+}
+
 function arenaDetails(group: THREE.Group) {
   const steel = material('#313b4d', { metalness: 0.7, roughness: 0.35 }), gold = material('#b99a57', { metalness: 0.7, roughness: 0.28 });
   const seat = material('#514164'), seatGold = material('#9b7950');
   for (const side of [-1, 1]) {
-    for (let row = 0; row < 5; row++) for (let i = 0; i < 42; i++) {
+    for (let row = 0; row < 7; row++) for (let i = 0; i < 42; i++) {
       const x = -21 + i * 1.02, y = row * 0.78, z = side * (12.8 + row * 1.35);
       box(group, [0.68, 0.56, 0.12], [x, y + 0.78, z + side * 0.17], i % 7 ? seat : seatGold);
       box(group, [0.67, 0.12, 0.55], [x, y + 0.51, z], i % 7 ? seat : seatGold);
@@ -311,6 +424,33 @@ function arenaDetails(group: THREE.Group) {
     for (let z = -21; z < 21; z += 3) branch(group, new THREE.Vector3(x, 14, z), new THREE.Vector3(x, 15, z + 3), 0.05, steel);
   }
   for (const x of [-2, 2]) branch(group, new THREE.Vector3(x, 11.3, 0), new THREE.Vector3(x, 15.8, 0), 0.045, steel);
+}
+
+/** Upper galleries and baseline seats extend the crowd without obstructing either hoop. */
+function extraArenaSeats(group: THREE.Group, seats: THREE.Vector3[]) {
+  const tier = material('#273144'), chair = material('#544363'), gold = material('#be9d59', { metalness: 0.45 });
+  for (const side of [-1, 1]) {
+    box(group, [45, 0.6, 4.1], [0, 5.8, side * 19.8], tier);
+    box(group, [45, 0.5, 0.16], [0, 6.2, side * 17.9], gold);
+    for (let row = 0; row < 4; row++) {
+      const y = 6.1 + row * 0.85, z = side * (18.45 + row * 0.86);
+      box(group, [44, 0.4, 0.86], [0, y + 0.1, z], tier);
+      for (let i = 0; i < 42; i++) {
+        const x = -21 + i * 1.02; seats.push(new THREE.Vector3(x, y, z));
+        box(group, [0.67, 0.56, 0.12], [x, y + 0.78, z + side * 0.17], chair);
+        box(group, [0.67, 0.12, 0.55], [x, y + 0.51, z], chair);
+      }
+    }
+    for (let row = 0; row < 4; row++) {
+      const x = side * (24 + row * 1.15), y = row * 0.8;
+      box(group, [1.1, 0.4, 20], [x, y + 0.1, 0], tier);
+      for (let i = 0; i < 18; i++) {
+        const z = -9 + i * 1.06; seats.push(new THREE.Vector3(x, y, z));
+        box(group, [0.12, 0.56, 0.67], [x + side * 0.17, y + 0.78, z], chair);
+        box(group, [0.55, 0.12, 0.67], [x, y + 0.51, z], chair);
+      }
+    }
+  }
 }
 
 /** Merge static scenery by material; animated water, particles and fan batches stay independent. */
@@ -345,6 +485,7 @@ export function createCourtWorlds(scene: THREE.Scene, street: THREE.Group) {
     if (theme === 'rucker') {
       plants(group, false, 13);
       urbanDetails(group);
+      modernSkyline(group);
       sign(group, 'RUCKER PARK', 'HARLEM  /  NEW YORK STREETBALL', [0, 5.7, -13.48], 9, 2.2, '#f3ac62');
       for (const side of [-1, 1]) for (let row = 0; row < 2; row++) {
         box(group, [29, 0.3, 0.85], [1, row * 0.48 + 0.26, side * (12 + row * 1.05)], metal);
@@ -354,8 +495,14 @@ export function createCourtWorlds(scene: THREE.Scene, street: THREE.Group) {
       box(group, [230, 0.25, 200], [0, -0.4, 0], material('#b9a3b0'));
       water = new THREE.Mesh(new THREE.PlaneGeometry(150, 240, 1, 1), material('#354f83', { metalness: 0.48, roughness: 0.27, emissive: '#514f8c', emissiveIntensity: 0.14 })); water.rotation.x = -Math.PI / 2; water.position.set(100, -0.19, 0); group.add(water);
       const foam = material('#c5b8d9', { transparent: true, opacity: 0.3 });
-      for (let i = 0; i < 10; i++) box(group, [0.15 + i * 0.07, 0.025, 180], [26 + i * 3.1, -0.15, 0], foam);
+      for (let i = 0; i < 15; i++) {
+        const x = 27 + i * 4.1;
+        const points = Array.from({ length: 19 }, (_, j) => new THREE.Vector3(x + Math.sin(j * 0.75 + i) * 0.35, -0.14, -90 + j * 10));
+        const wave = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), 48, 0.035 + i * 0.007, 4, false), foam); wave.scale.y = 0.25; wave.position.y = -0.105; group.add(wave);
+      }
       updateScenery = beachDetails(group);
+      coastalTown(group);
+      coastalClouds(group);
       const bark = material('#6c566b'), leaf = material('#3a5c68', { side: THREE.DoubleSide });
       for (let i = 0; i < 12; i++) {
         const x = -27 + i * 5, z = i % 2 ? -16 : 16;
@@ -377,7 +524,8 @@ export function createCourtWorlds(scene: THREE.Scene, street: THREE.Group) {
       const sail = new THREE.Mesh(new THREE.ConeGeometry(2, 5, 3), material('#fff3d0')); sail.position.set(49.7, 3.4, -16); sail.scale.z = 0.04; group.add(sail);
     } else if (theme === 'forest') {
       box(group, [180, 0.2, 160], [0, -0.35, 0], material('#334e3d'));
-      plants(group, true, 24);
+      plants(group, true, 48);
+      forestDepth(group);
       updateScenery = giantForest(group);
       sign(group, 'WILDWOOD', 'THE FOREST BASKETBALL CLUB', [0, 4.4, -16], 10, 2.5, '#aad6a0');
       const log = material('#725134');
@@ -391,11 +539,12 @@ export function createCourtWorlds(scene: THREE.Scene, street: THREE.Group) {
       for (let i = 0; i < 120; i++) { const a = i * 2.4; matrix.makeTranslation(Math.cos(a) * (22 + i % 5), 0.15 + i % 3 * 0.12, Math.sin(a) * (14 + i % 4)); flowers.setMatrixAt(i, matrix); } group.add(flowers);
     } else {
       arenaDetails(group);
+      extraArenaSeats(group, seats);
       box(group, [60, 0.3, 44], [0, -0.4, 0], material('#121a29'));
       for (const z of [-22, 22]) box(group, [58, 17, 0.4], [0, 8, z], material('#192235'));
       for (const x of [-29, 29]) box(group, [0.4, 17, 44], [x, 8, 0], material('#192235'));
       box(group, [58, 0.3, 44], [0, 16, 0], material('#111929'));
-      for (const side of [-1, 1]) for (let row = 0; row < 5; row++) {
+      for (const side of [-1, 1]) for (let row = 0; row < 7; row++) {
         const z = side * (12.8 + row * 1.35), y = row * 0.78;
         box(group, [44, 0.5, 1.3], [0, y + 0.1, z], material(row % 2 ? '#30394c' : '#222c40'));
         for (let i = 0; i < 42; i++) seats.push(new THREE.Vector3(-21 + i * 1.02, y, z));
