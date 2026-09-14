@@ -219,3 +219,12 @@ export function applyShotRangeLimit(velocity: THREE.Vector3, shooterX: number, r
   if (isBackcourtShot(shooterX, rimX) && roll >= BACKCOURT_MAKE_CAP) velocity.clampLength(0, 9);
   return velocity;
 }
+
+
+/** Sweep only actual ball travel through a small palm contact volume. */
+export function ballTouchesHand(previous: THREE.Vector3, position: THREE.Vector3, hand: THREE.Vector3, radius = 0.25) {
+  const travel = position.clone().sub(previous);
+  const t = travel.lengthSq() > 1e-10
+    ? THREE.MathUtils.clamp(hand.clone().sub(previous).dot(travel) / travel.lengthSq(), 0, 1) : 0;
+  return previous.clone().addScaledVector(travel, t).distanceToSquared(hand) <= radius * radius;
+}

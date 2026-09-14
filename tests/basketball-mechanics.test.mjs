@@ -95,9 +95,9 @@ test('layup paths reach the hoop through the real rim and backboard collision ch
   }
 });
 
-test('putback reaches nearby rebound and clears the previous guided shot', () => {
+test('putback catches a ball at the palm and clears the previous guided shot', () => {
   const h = harness(); h.athletes[0].jump = 0.8;
-  h.ball.position.set(18.3, 2.6, 1.1);
+  h.ball.position.set(18.08, 2.7, 0.04);
   assert.equal(h.api.canCatchPutback(0, 1/60), true);
   h.layupArc = {};
   h.api.catchUserPutback();
@@ -150,4 +150,13 @@ test('bank-shot preview matches live board rebound and scores once', () => {
   }
   assert.equal(h.ball.banked, true); assert.equal(h.points, 2);
   assert.ok(h.ball.position.distanceTo(preview.points.at(-1)) < 1e-9);
+});
+
+
+test('putback rejects the old one-meter magnet and direct catch bypass', () => {
+  const h = harness(); h.athletes[0].jump = 0.8;
+  h.ball.position.set(18.3, 2.6, 1.1);
+  assert.equal(h.api.canCatchPutback(0, 1/60), false);
+  assert.equal(h.api.catchUserPutback(), false);
+  assert.equal(h.ball.owner, null); assert.equal(h.dunkHasBall, false);
 });

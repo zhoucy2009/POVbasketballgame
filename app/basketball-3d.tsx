@@ -5,7 +5,7 @@ import * as THREE from 'three';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { closeMotionLoop, fitAnimatedRig } from '@/lib/basketball-animation';
-import { FIXED_STEP, advanceFlight, contactImpulse, resolveFloor, acceleratePlanar, aimedShotVelocity, flightTimeToFloor, projectedShotOrigin, shotTiming, PLAYER_GRAVITY, backboardContact, rimContact, forecastShot, findGreenWindow, isBackcourtShot, applyShotRangeLimit, widenGreenWindow, assistedShotPower, type GreenWindow, type AssistedGreenWindow } from '@/lib/basketball-physics';
+import { FIXED_STEP, advanceFlight, contactImpulse, resolveFloor, acceleratePlanar, aimedShotVelocity, flightTimeToFloor, projectedShotOrigin, shotTiming, PLAYER_GRAVITY, backboardContact, rimContact, forecastShot, ballTouchesHand, findGreenWindow, isBackcourtShot, applyShotRangeLimit, widenGreenWindow, assistedShotPower, type GreenWindow, type AssistedGreenWindow } from '@/lib/basketball-physics';
 import { addCourtDetails, addAthleteDetails } from '@/lib/basketball-details';
 import { COURT_THEMES, createCourtWorlds, createAnimalLook, type CourtTheme } from '@/lib/basketball-worlds';
 import OnlineLobby from '@/components/online-lobby';
@@ -110,7 +110,8 @@ const BASKET_POLE_RADIUS = 0.24;
 const SHOT_CONTEST_RADIUS = 2.25;
 const SHOT_CONE_RADIUS = 3.15;
 const SHOT_CONE_HALF_ANGLE = Math.PI * 0.21;
-const BLOCK_HORIZONTAL_RADIUS = 0.82;
+const HAND_CONTACT_RADIUS = 0.25;
+const BLOCK_SUCCESS_CHANCE = 0.45;
 const USER_STEAL_REACH = 1.05;
 const AI_STEAL_REACH = 1;
 const USER_STEAL_CHANCE = 0.22;
@@ -125,8 +126,8 @@ const LAYUP_DURATION = 1.28;
 const LAYUP_APPROACH_DURATION = 0.74;
 const ACROBATIC_LAYUP_FLIGHT = 0.96;
 const DUNK_START_RADIUS = 5.2;
-const PUTBACK_PLAYER_RADIUS = 3.8;
-const PUTBACK_WINDOW = 1.45;
+const PUTBACK_PLAYER_RADIUS = 1.8;
+const PUTBACK_WINDOW = 0.95;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -844,6 +845,7 @@ export default function Basketball3D() {
     const dunkStartPosition = new THREE.Vector3();
     const dunkFinishPosition = new THREE.Vector3();
     let dribbling = false;
+    let dunkIsPutback = false;
     let dribbleGrace = 0;
     let dribbleMove: DribbleMove = 'forward';
     let dribbleSequenceMove: DribbleMove = 'forward';
@@ -885,6 +887,7 @@ export default function Basketball3D() {
     const teamTactics: [TeamTactic | null, TeamTactic | null] = [null, null];
     let stealProtectionUntil = 0;
     let uiAt = 0;
+    const blockContactResolved = Array.from({ length: athletes.length }, () => 0);
     let last = performance.now() / 1000;
     let dragLooking = false;
     let blockCameraKick = 0;
@@ -1096,7 +1099,7 @@ export default function Basketball3D() {
         player.moveKind = 'forward'; player.moveUntil = 0; player.dribblePhase = index * 0.17; player.dribbleHand = index % 2 ? 'left' : 'right';
         player.group.visible = isActiveIndex(index) && (index !== 0 || !viewModel);
         aiDecisionCooldown[index] = 0.2 + index * 0.08; aiPassCooldown[index] = 0; aiShotCooldown[index] = 0.8 + index * 0.08;
-        stationaryTime[index] = 0; separationMoveUntil[index] = 0; contactPressure[index] = 0; blockAttemptUntil[index] = 0;
+        stationaryTime[index] = 0; separationMoveUntil[index] = 0; contactPressure[index] = 0; blockAttemptUntil[index] = 0; blockContactResolved[index] = 0;
         offBallCallUntil[index] = 0; offBallCallCooldown[index] = 0; offBallOpportunity[index] = 'none'; offBallBonus[index] = 0;
         assistedShotUntil[index] = 0; assistedShotBonus[index] = 0; aiShotPlans[index] = null;
         defenderTrackedMark[index] = -1; defenderReactionUntil[index] = 0;
@@ -1487,6 +1490,7 @@ export default function Basketball3D() {
       const currentTime = performance.now() / 1000;
       if (layingUp || dunking || charging || shotPending || dunkCharging) return;
       if (!spendStamina(me, STEAL_STAMINA_COST)) return;
+      dunkIsPutback = !dunkHasBall;
       me.action = 0.62; me.actionKind = 'steal';
       if (onlineSessionRef.current?.role === 'guest') {
         sendPeer({ type: 'command', command: { kind: 'steal' } satisfies PeerCommand });
@@ -1962,9 +1966,9 @@ export default function Basketball3D() {
       layupArc = null;
       ball.banked = false; ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = alleyOop ? 0.42 : putback ? 0.4 : 0.5; ball.shotPoints = 2; ball.scored = false;
       const contactPenalty = contactPressure[owner] * 0.18;
-      const chance = clamp((alleyOop ? 0.84 : putback ? 0.68 : 0.91) + (coneRead.defendersInCone === 0 ? 0.05 : 0) - coneRead.contestStrength * (putback ? 0.5 : 0.62) - contactPenalty, 0.01, 0.98);
+      const chance = clamp((alleyOop ? 0.84 : putback ? 0.4 : 0.91) + (coneRead.defendersInCone === 0 ? 0.05 : 0) - coneRead.contestStrength * (putback ? 0.5 : 0.62) - contactPenalty, 0.01, 0.98);
       ball.shotMake = Math.random() < chance;
-      const from = alleyOop ? ball.position.clone() : getHandPosition(player, 'right');
+      const from = alleyOop || putback ? ball.position.clone() : getHandPosition(player, 'right');
       ball.position.copy(from);
       const t = ball.shotFlight;
       const aim = rim.clone();
@@ -2071,6 +2075,7 @@ export default function Basketball3D() {
           const impulse = closingSpeed * 0.52;
           a.velocity.x += nx * impulse; a.velocity.z += nz * impulse;
           b.velocity.x -= nx * impulse; b.velocity.z -= nz * impulse;
+      if (putback && !canCatchPutback(owner, FIXED_STEP)) return false;
           if (a.team !== b.team) {
             contactPressure[first] = Math.max(contactPressure[first], impact);
             contactPressure[second] = Math.max(contactPressure[second], impact);
@@ -2140,8 +2145,7 @@ export default function Basketball3D() {
         const defendingBlock = wasShot && player.team !== athletes[ball.lastOwner].team && ball.position.y > 1.25;
         makeBallLooseFromCollision();
         if (defendingBlock) {
-          showMessage(index === 0 ? '身体封堵！' : '投篮撞到防守人！', 720);
-          if (index === 0) showBlockFeedback();
+          showMessage('碰到防守人，球被弹开', 720);
         }
         return true;
       }
@@ -2175,13 +2179,8 @@ export default function Basketball3D() {
       const rim = hoop(player.team);
       if (horizontalDistance(player.position, rim) > PUTBACK_PLAYER_RADIUS || player.jump < 0.12) return false;
       if (ball.position.y < 1.35 || ball.position.y > 2.8 + player.jump) return false;
-      const hand = getHandPosition(player, 'right');
-      // Sweep one frame of ball travel so fast rebounds cannot skip the hands.
-      const travel = ball.velocity.clone().multiplyScalar(dt);
-      const amount = travel.lengthSq() > 0 ? clamp(ball.position.clone().sub(hand).dot(travel) / travel.lengthSq(), 0, 1) : 0;
-      const nearest = ball.position.clone().addScaledVector(travel, -amount);
-      return nearest.distanceTo(hand) <= 1.05
-        || horizontalDistance(nearest, rim) <= 1.65 && horizontalDistance(nearest, player.position) <= 1.85;
+      const previous = ball.position.clone().addScaledVector(ball.velocity, -Math.min(dt, FIXED_STEP));
+      return (['left', 'right'] as const).some(hand => ballTouchesHand(previous, ball.position, getHandPosition(player, hand), HAND_CONTACT_RADIUS));
     };
 
     const catchUserPutback = () => {
@@ -2210,9 +2209,9 @@ export default function Basketball3D() {
             const rim = hoop(player.team);
             const coneRead = readShotCone(0, 2.25, Math.PI * 0.28);
             const contactPenalty = contactPressure[0] * 0.18;
-            const makeChance = clamp((dunkWasPerfect ? 0.97 : 0.91) + (coneRead.defendersInCone === 0 ? 0.01 : 0) - coneRead.contestStrength * 0.62 - contactPenalty, 0.02, 0.98);
-            const madeDunk = Math.random() < makeChance;
-            const blocked = !madeDunk && coneRead.defendersInCone > 0 && Math.random() < 0.3 + coneRead.contestStrength * 0.55;
+            const makeChance = clamp((dunkIsPutback ? 0.44 : dunkWasPerfect ? 0.97 : 0.91) + (coneRead.defendersInCone === 0 ? 0.01 : 0) - coneRead.contestStrength * 0.62 - contactPenalty, 0.02, 0.98);
+            const blocked = findHandBlocker(player.team, ball.position, ball.position, now) >= 0;
+            const madeDunk = !blocked && Math.random() < makeChance;
             dunkResolved = true;
             ball.owner = null; ball.lastOwner = 0; dunkHasBall = false;
             player.action = 0;
@@ -2306,12 +2305,26 @@ export default function Basketball3D() {
           player.dribblePhase = (player.dribblePhase + dt * (aiMove === 'between' ? 1.7 : aiMove.startsWith('spin') ? 2.2 : 2.55)) % 1;
           if (player.dribblePhase < previousPhase || aiMove === 'cross-left' || aiMove === 'cross-right') {
             if (aiMove === 'cross-left') player.dribbleHand = 'left';
+      if (!canCatchPutback(0, FIXED_STEP)) return false;
+      dunkIsPutback = true;
             else if (aiMove === 'cross-right') player.dribbleHand = 'right';
             else player.dribbleHand = oppositeHand(player.dribbleHand);
           }
           const palm = getHandPosition(player, player.dribbleHand);
+      return true;
           const side = player.dribbleHand === 'left' ? -1 : 1;
           const localZ = aiMove === 'between' || aiMove.startsWith('spin') ? -0.22 : aiMove === 'attack' || aiMove.startsWith('burst') ? 0.46 : 0.24;
+    const findHandBlocker = (shooterTeam: Team, previous: THREE.Vector3, position: THREE.Vector3, now: number) => athletes.findIndex((defender, index) => {
+      const attempt = blockAttemptUntil[index];
+      if (!isActiveIndex(index) || defender.team === shooterTeam || attempt <= now || defender.jump < 0.12
+        || blockContactResolved[index] === attempt) return false;
+      const touching = (['left', 'right'] as const).some(hand => ballTouchesHand(previous, position, getHandPosition(defender, hand), HAND_CONTACT_RADIUS));
+      if (!touching) return false;
+      // One roll per jump, even if the ball stays near a hand for several frames.
+      blockContactResolved[index] = attempt;
+      return Math.random() < BLOCK_SUCCESS_CHANCE;
+    });
+
           const ground = player.group.localToWorld(new THREE.Vector3(side * 0.34, 0, localZ));
           ground.y = BALL_RADIUS;
           const bounce = Math.pow(Math.abs(Math.cos(player.dribblePhase * Math.PI)), 0.72);
@@ -2388,17 +2401,7 @@ export default function Basketball3D() {
         keepBallOnCourt();
 
         const shooterTeam = athletes[ball.lastOwner].team;
-        const ballGround = new THREE.Vector3(ball.position.x, 0, ball.position.z);
-        const blockerIndex = ball.mode === 'shot' ? athletes.findIndex((defender, index) => {
-          if (!isActiveIndex(index) || defender.team === shooterTeam) return false;
-          const activeAttempt = now <= blockAttemptUntil[index];
-          const blockReach = Math.max(defender.jump, activeAttempt ? 0.72 : 0);
-          const reachRadius = BLOCK_HORIZONTAL_RADIUS + (index === 3 && onlineSessionRef.current ? 0.18 : 0);
-          return (activeAttempt || defender.actionKind === 'jump')
-            && horizontalDistance(defender.position, ballGround) < reachRadius
-            && ball.position.y > 0.78 + blockReach
-            && ball.position.y < 2.42 + blockReach;
-        }) : -1;
+        const blockerIndex = ball.mode === 'shot' ? findHandBlocker(shooterTeam, previous, ball.position, now) : -1;
         if (blockerIndex >= 0) {
           const shooter = athletes[ball.lastOwner];
           ball.mode = 'loose';
@@ -2438,7 +2441,8 @@ export default function Basketball3D() {
         if (ball.mode === 'loose' && ball.shotAge > 0.12) {
           let nearest = -1; let nearestDistance = 99;
           athletes.forEach((player, index) => {
-            if (!isActiveIndex(index)) return;
+            if (!isActiveIndex(index) || index === 0 && dunking || index === 3 && remotePutbackUntil > now) return;
+            if (player.jump > 0.12 && !(['left', 'right'] as const).some(hand => ballTouchesHand(previous, ball.position, getHandPosition(player, hand), HAND_CONTACT_RADIUS))) return;
             const reach = 1.0 + player.jump * 0.5;
             const horizontal = player.position.distanceTo(new THREE.Vector3(ball.position.x, 0, ball.position.z));
             if (horizontal < reach && ball.position.y < 1.35 + player.jump && horizontal < nearestDistance) { nearest = index; nearestDistance = horizontal; }
@@ -2446,10 +2450,9 @@ export default function Basketball3D() {
           if (nearest >= 0) {
             const rebounder = athletes[nearest];
             const nearOwnRim = rebounder.position.distanceTo(hoop(rebounder.team).setY(0)) < 2.8;
-            const canPutback = nearest !== 0 && nearOwnRim && ball.position.y > 1.45 && rebounder.jump > 0.12 && Math.random() < 0.58;
+            const canPutback = nearest !== 0 && nearOwnRim && canCatchPutback(nearest, dt) && Math.random() < 0.35;
             if (!canPutback || !startAiDunk(nearest, true)) {
-              if (nearest === 0 && dunking && !dunkResolved) catchUserPutback();
-              else { ball.owner = nearest; ball.lastOwner = nearest; ball.mode = 'held'; showMessage(nearest === 0 ? '抢到篮板！' : '篮板'); }
+              ball.owner = nearest; ball.lastOwner = nearest; ball.mode = 'held'; showMessage(nearest === 0 ? '抢到篮板！' : '篮板');
             }
           }
         }
