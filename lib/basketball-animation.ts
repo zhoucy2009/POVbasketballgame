@@ -23,3 +23,19 @@ export function closeMotionLoop(clip: THREE.AnimationClip, blendDuration = 0.16)
   }
   return clip;
 }
+
+/** Size the evaluated skin, since imported bind-pose bounds can include stale geometry. */
+export function fitAnimatedRig(model: THREE.Group, idleClip: THREE.AnimationClip, height: number) {
+  const mixer = new THREE.AnimationMixer(model);
+  mixer.clipAction(idleClip).play();
+  mixer.update(0.1);
+  model.updateMatrixWorld(true);
+  model.traverse(object => { if (object instanceof THREE.SkinnedMesh) object.computeBoundingBox(); });
+  const bounds = new THREE.Box3().setFromObject(model);
+  const center = bounds.getCenter(new THREE.Vector3());
+  const scale = height / Math.max(0.01, bounds.max.y - bounds.min.y);
+  model.scale.setScalar(scale);
+  model.position.set(-center.x * scale, -bounds.min.y * scale, -center.z * scale);
+  model.updateMatrixWorld(true);
+  return mixer;
+}

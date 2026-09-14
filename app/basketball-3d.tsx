@@ -4,8 +4,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
-import { closeMotionLoop } from '@/lib/basketball-animation';
-import { FIXED_STEP, advanceFlight, contactImpulse, resolveFloor, acceleratePlanar } from '@/lib/basketball-physics';
+import { closeMotionLoop, fitAnimatedRig } from '@/lib/basketball-animation';
+import { FIXED_STEP, advanceFlight, contactImpulse, resolveFloor, acceleratePlanar, aimedShotVelocity, flightPoint, flightTimeToFloor } from '@/lib/basketball-physics';
+import { addCourtDetails, addAthleteDetails } from '@/lib/basketball-details';
 import OnlineLobby from '@/components/online-lobby';
 import type { OnlineMatchSession } from '@/lib/multiplayer-types';
 
@@ -145,6 +146,7 @@ export default function Basketball3D() {
   const [score, setScore] = useState<[number, number]>([0, 0]);
   const [clock, setClock] = useState(90);
   const [charge, setCharge] = useState(0);
+  const [aimActive, setAimActive] = useState(false);
   const [dunkCharge, setDunkCharge] = useState(0);
   const [stamina, setStamina] = useState(1);
   const [message, setMessage] = useState('');
@@ -220,7 +222,7 @@ export default function Basketball3D() {
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 0.94;
@@ -294,21 +296,23 @@ export default function Basketball3D() {
 
     const court = new THREE.Mesh(
       new THREE.BoxGeometry(COURT_LENGTH, 0.5, COURT_WIDTH),
-      new THREE.MeshStandardMaterial({ color: '#b96f3f', roughness: 0.64, metalness: 0.04 }),
+      new THREE.MeshStandardMaterial({ color: '#ad7b4e', roughness: 0.64, metalness: 0.04 }),
     );
     court.position.y = -0.28;
     court.receiveShadow = true;
     scene.add(court);
 
-    for (let x = -20.75; x < 21; x += 0.72) {
-      const plank = new THREE.Mesh(
-        new THREE.BoxGeometry(0.68, 0.018, COURT_WIDTH - 0.2),
-        new THREE.MeshStandardMaterial({ color: Math.round(x * 10) % 2 ? '#c77a46' : '#d18550', roughness: 0.48, bumpMap: woodTexture, bumpScale: 0.009, roughnessMap: woodTexture }),
-      );
-      plank.position.set(x, 0.006, 0);
-      plank.receiveShadow = true;
-      scene.add(plank);
+    const floorMaterial = new THREE.MeshStandardMaterial({ color: '#c58a52', roughness: 0.57, map: woodTexture, bumpMap: woodTexture, bumpScale: 0.006 });
+    const planks = new THREE.InstancedMesh(new THREE.BoxGeometry(0.713, 0.018, 5.64), floorMaterial, 58 * 4);
+    const plankMatrix = new THREE.Matrix4();
+    let plankIndex = 0;
+    for (let column = 0; column < 58; column++) for (let row = 0; row < 4; row++) {
+      plankMatrix.makeTranslation(-20.52 + column * 0.72, 0.006, -8.49 + row * 5.66);
+      planks.setMatrixAt(plankIndex, plankMatrix);
+      planks.setColorAt(plankIndex++, new THREE.Color().setHSL(0.085 + ((column * 7 + row * 3) % 5) * 0.004, 0.23, 0.78 + ((column * 3 + row) % 4) * 0.045));
     }
+    planks.receiveShadow = true;
+    scene.add(planks);
 
     const apron = new THREE.Mesh(new THREE.BoxGeometry(46, 0.12, 27), new THREE.MeshStandardMaterial({ color: '#334c59', roughness: 0.94, bumpMap: rubberTexture, bumpScale: 0.025 }));
     apron.position.y = -0.15; apron.receiveShadow = true; scene.add(apron);
@@ -361,12 +365,6 @@ export default function Basketball3D() {
       column.position.set(x, 3.6, -13.72);
       scene.add(column);
     }
-    const fenceMat = new THREE.MeshBasicMaterial({ color: '#253342', wireframe: true, transparent: true, opacity: 0.32 });
-    const fence = new THREE.Mesh(new THREE.PlaneGeometry(38, 5, 32, 7), fenceMat);
-    fence.scale.x = 1.26;
-    fence.position.set(0, 5.5, -13.7);
-    scene.add(fence);
-
     const leafMat = new THREE.MeshStandardMaterial({color:'#8d9e22',roughness:1,flatShading:true});
     for(let i=0;i<46;i++){
       const leaf=new THREE.Mesh(new THREE.DodecahedronGeometry(.55+Math.random()*.35,0),leafMat);
@@ -426,6 +424,7 @@ export default function Basketball3D() {
       scene.add(group);
     };
     makeHoop(0); makeHoop(1);
+    addCourtDetails(scene, fabricTexture);
 
     const createAthlete = (color: string, number: number) => {
       const group = new THREE.Group();
@@ -433,8 +432,8 @@ export default function Basketball3D() {
       body.name = 'proceduralBody';
       group.add(body);
       const skin = new THREE.MeshStandardMaterial({ color: number % 3 === 0 ? '#8b5438' : '#c9855d', roughness: 0.78, flatShading: false });
-      const jersey = new THREE.MeshStandardMaterial({ color, roughness: 0.5, flatShading: false });
-      const shorts = new THREE.MeshStandardMaterial({ color: new THREE.Color(color).multiplyScalar(0.52), roughness: 0.68, flatShading: false });
+      const jersey = new THREE.MeshStandardMaterial({ color, roughness: 0.8, bumpMap: fabricTexture, bumpScale: 0.003 });
+      const shorts = new THREE.MeshStandardMaterial({ color: new THREE.Color(color).multiplyScalar(0.52), roughness: 0.85, bumpMap: fabricTexture, bumpScale: 0.003 });
       const dark = new THREE.MeshStandardMaterial({ color: '#111820', roughness: 0.72, flatShading: false });
       const shoe = new THREE.MeshStandardMaterial({ color: number % 2 ? '#f4f4f1' : '#141b22', roughness: 0.6, flatShading: false });
 
@@ -503,6 +502,8 @@ export default function Basketball3D() {
     let rigCancelled = false;
     let viewModel: THREE.Group | undefined;
     let viewMixer: THREE.AnimationMixer | undefined;
+    let viewLeftHand: THREE.Bone | undefined;
+    let viewRightHand: THREE.Bone | undefined;
     let viewActions: Map<string, THREE.AnimationAction> | undefined;
     let viewCurrentClip = 'Mixamo_Run';
     const characterMaterial = (entry: THREE.Material) => {
@@ -623,11 +624,7 @@ export default function Basketball3D() {
         const model = cloneSkeleton(character) as THREE.Group;
         model.name = 'rigModel';
         model.animations = [];
-        const bounds = new THREE.Box3().setFromObject(model);
-        const center = bounds.getCenter(new THREE.Vector3());
-        const scale = athleteHeights[index] / Math.max(0.01, bounds.max.y - bounds.min.y);
-        model.scale.setScalar(scale);
-        model.position.set(-center.x * scale, -bounds.min.y * scale, -center.z * scale);
+        const mixer = fitAnimatedRig(model, idleClip, athleteHeights[index]);
 
         const visual = new THREE.Group();
         visual.name = 'rigVisual';
@@ -645,6 +642,8 @@ export default function Basketball3D() {
           object.material = materials.length === 1 ? materials[0] : materials;
           materials.forEach((entry) => {
             if (!('color' in entry) || !(entry.color instanceof THREE.Color)) return;
+            if (entry.name === 'Skin') entry.color.set(['#c59070', '#935f46', '#b77952', '#bd8c68', '#80563f', '#cb9b7e'][index]);
+            if (entry.name === 'Hair') entry.color.set(index % 3 === 0 ? '#201911' : '#30261d');
             if (entry.name !== 'Purple' && entry.name !== 'LightBlue') return;
             entry.color.set(teamColor);
             teamMaterials.push(entry as THREE.MeshStandardMaterial | THREE.MeshPhongMaterial);
@@ -658,21 +657,6 @@ export default function Basketball3D() {
         if (oldBody) player.group.remove(oldBody);
         player.group.add(visual);
 
-        const numberCanvas = document.createElement('canvas');
-        numberCanvas.width = 128; numberCanvas.height = 128;
-        const context = numberCanvas.getContext('2d')!;
-        context.fillStyle = '#fff'; context.font = '900 82px Arial'; context.textAlign = 'center'; context.textBaseline = 'middle';
-        context.fillText(String(player.number), 64, 68);
-        const texture = new THREE.CanvasTexture(numberCanvas); texture.colorSpace = THREE.SRGBColorSpace;
-        const numberMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.46, 0.54), new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide }));
-        numberMesh.name = 'rigNumber'; numberMesh.position.set(0, 1.43, -0.36); numberMesh.rotation.y = Math.PI;
-        numberMesh.visible = index !== 0;
-        player.group.add(numberMesh);
-        player.group.updateMatrixWorld(true);
-        const chest = primarySkeleton?.getBoneByName('Spine2') ?? primarySkeleton?.getBoneByName('Spine');
-        chest?.attach(numberMesh);
-
-        const mixer = new THREE.AnimationMixer(model);
         const actions = new Map<string, THREE.AnimationAction>();
         motionClips.forEach((clip) => actions.set(clip.name, mixer.clipAction(clip)));
         const idle = actions.get('Idle_Loop');
@@ -688,12 +672,13 @@ export default function Basketball3D() {
         const leftFoot = primarySkeleton?.getBoneByName('FootL');
         const rightFoot = primarySkeleton?.getBoneByName('FootR');
         if (leftFoot && rightFoot) player.feet = [leftFoot, rightFoot];
+        if (primarySkeleton) addAthleteDetails(player.group, primarySkeleton, teamColor, player.number, fabricTexture, index === 0);
         player.rig = model;
         player.visual = visual;
       });
 
       // Keep the Mixamo geometry intact. A shader mask reveals the animated arms
-      // and lower legs without cutting triangles out of the skinned mesh. Head,
+      // without cutting triangles out of the skinned mesh. Head,
       // torso and shoulder-joint weights never render, so they cannot cross the
       // camera or create the broken polygons caused by indexed-geometry slicing.
       viewModel = cloneSkeleton(mixamoCharacter) as THREE.Group;
@@ -719,7 +704,7 @@ export default function Basketball3D() {
         const skinWeight = sourceGeometry.attributes.skinWeight;
         if (object instanceof THREE.SkinnedMesh && skinIndex && skinWeight) {
           const visibleBones = new Set(object.skeleton.bones
-            .map((bone, boneIndex) => (/Arm|ForeArm|Hand|UpLeg|Leg|Foot|Toe/i.test(bone.name) && !/Shoulder/i.test(bone.name) ? boneIndex : -1))
+            .map((bone, boneIndex) => (/Arm|ForeArm|Hand/i.test(bone.name) && !/Shoulder/i.test(bone.name) ? boneIndex : -1))
             .filter((boneIndex) => boneIndex >= 0));
           const mask = new Float32Array(sourceGeometry.attributes.position.count);
           for (let vertex = 0; vertex < mask.length; vertex += 1) {
@@ -744,13 +729,15 @@ export default function Basketball3D() {
               .replace('#include <begin_vertex>', '#include <begin_vertex>\nvViewPartMask = viewPartMask;');
             shader.fragmentShader = shader.fragmentShader
               .replace('#include <common>', '#include <common>\nvarying float vViewPartMask;')
-              .replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\nif (vViewPartMask < 0.045) discard;');
+              .replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\nif (vViewPartMask < 0.4) discard;');
           };
-          entry.customProgramCacheKey = () => 'first-person-limbs-v2';
+          entry.customProgramCacheKey = () => 'first-person-arms-v3';
         });
       });
       const viewSkeleton = viewSkinnedMeshes[0]?.skeleton;
       if (viewSkeleton) viewSkinnedMeshes.slice(1).forEach((mesh) => mesh.bind(viewSkeleton, mesh.bindMatrix));
+      viewLeftHand = viewSkeleton?.bones.find(bone => bone.name.endsWith('LeftHand'));
+      viewRightHand = viewSkeleton?.bones.find(bone => bone.name.endsWith('RightHand'));
       camera.add(viewModel);
       viewMixer = new THREE.AnimationMixer(viewModel);
       viewActions = new Map<string, THREE.AnimationAction>();
@@ -870,7 +857,7 @@ export default function Basketball3D() {
     let lobPassActive = false;
     let blockFeedbackTimer: number | undefined;
     type PeerPlayerState = { seq: number; x: number; z: number; vx: number; vz: number; facing: number; jump: number; action: number; actionKind: MotionName; moveKind: DribbleMove };
-    type PeerCommand = { kind: 'shot'; power: number } | { kind: 'layup'; acrobatic: boolean } | { kind: 'dash'; burst: boolean } | { kind: 'jump' | 'steal' | 'dunk' };
+    type PeerCommand = { kind: 'shot'; power: number; yaw: number; pitch: number; origin: [number, number, number] } | { kind: 'layup'; acrobatic: boolean } | { kind: 'dash'; burst: boolean } | { kind: 'jump' | 'steal' | 'dunk' };
     let remotePutbackUntil = 0;
     type PeerEvent = { kind: 'block'; blocker: number };
     type WorldState = { seq: number; ball: { x: number; y: number; z: number; vx: number; vy: number; vz: number; owner: number | null; mode: BallMode }; score: [number, number]; time: number };
@@ -985,7 +972,9 @@ export default function Basketball3D() {
     const oppositeHand = (hand: DribbleHand): DribbleHand => hand === 'right' ? 'left' : 'right';
     const getHandPosition = (player: Athlete, hand: DribbleHand) => {
       player.group.updateMatrixWorld(true);
-      const bone = hand === 'left' ? player.leftHand : player.rightHand;
+      const viewHand = player === athletes[0] && viewModel ? (hand === 'left' ? viewLeftHand : viewRightHand) : undefined;
+      if (viewHand) camera.updateMatrixWorld(true);
+      const bone = viewHand ?? (hand === 'left' ? player.leftHand : player.rightHand);
       if (bone) {
         const position = bone.getWorldPosition(new THREE.Vector3());
         position.y -= BALL_RADIUS * 0.32;
@@ -1118,7 +1107,8 @@ export default function Basketball3D() {
       const planarVelocity = me.velocity.clone().setY(0);
       const approachSpeed = planarVelocity.length();
       const approachAlignment = approachSpeed > 0.01 ? planarVelocity.multiplyScalar(1 / approachSpeed).dot(toRim) : 0;
-      if (approachSpeed < LAYUP_MIN_SPEED || approachAlignment < 0.62) return false;
+      const viewAlignment = new THREE.Vector3(Math.sin(cameraYaw), 0, -Math.cos(cameraYaw)).dot(toRim);
+      if (approachSpeed < LAYUP_MIN_SPEED || approachAlignment < 0.62 || viewAlignment < 0.8) return false;
 
       layingUp = true; layupElapsed = 0; layupReleased = false; layupAcrobatic = false; layupViewTurn = 0; layupDodgeSide = 1;
       layupStartPosition.copy(me.position);
@@ -1203,61 +1193,72 @@ export default function Basketball3D() {
       // instead of freezing the player for more than a second after release.
       me.action = shotStyle === 'fade' ? 0.88 : shotStyle === 'normal' ? 0.78 : 0.82;
       me.actionKind = 'shoot';
-      setCharge(0);
+      setCharge(pendingShotPower);
     };
 
-    const releaseShot = (owner: number, power: number, styleOverride: ShotStyle = 'normal') => {
+    const releaseShot = (owner: number, power: number, styleOverride: ShotStyle = 'normal', remoteAim?: { yaw: number; pitch: number; origin: THREE.Vector3 }) => {
       if (ball.owner !== owner) return;
       if (owner === 0 && onlineSessionRef.current?.role === 'guest') {
-        sendPeer({ type: 'command', command: { kind: 'shot', power } satisfies PeerCommand });
+        sendPeer({ type: 'command', command: { kind: 'shot', power, yaw: cameraYaw, pitch: cameraPitch, origin: getGatherPosition(athletes[0]).toArray() as [number, number, number] } satisfies PeerCommand });
       }
       const player = athletes[owner];
       layupShotActive = false;
       layupArc = null;
       const appliedStyle = owner === 0 ? shotStyle : styleOverride;
-      player.jumpV = Math.max(player.jumpV, appliedStyle === 'fade' ? 5.35 : 5.15);
+      // The user's take-off already happened in queueUserShot; do not kick upward again at release.
+      if (owner !== 0 && !remoteAim && player.jump < 0.04) player.jumpV = Math.max(player.jumpV, 5.15);
       player.action = owner === 0 ? Math.max(player.action, 0.44) : 1.15;
       player.actionKind = 'shoot';
       ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = 1.02 + Math.abs(player.position.x) * 0.014; ball.scored = false;
       const target = hoop(player.team);
-      if (owner !== 0) facePoint(player, target);
+      if (owner !== 0 && !remoteAim) facePoint(player, target);
       const distance = player.position.distanceTo(new THREE.Vector3(target.x, 0, target.z));
-      const ideal = clamp(0.54 + distance * 0.012, 0.58, 0.82);
-      const coneRead = readShotCone(owner);
-      const stability = shotStability(owner);
-      const currentTime = performance.now() / 1000;
-      const styleCreatedSpace = appliedStyle !== 'normal';
-      const dribbleCreatedSpace = separationMoveUntil[owner] > currentTime;
-      const actionBonus = coneRead.defendersInCone === 0
-        ? styleCreatedSpace ? 0.09 : dribbleCreatedSpace ? 0.07 : 0
-        : 0;
-      const openBonus = coneRead.defendersInCone === 0 ? 0.1 : 0;
-      const timingPenalty = Math.abs(power - ideal) * (owner === 0 ? 1.35 : 1.1);
-      const stabilityPenalty = (1 - stability) * 0.3;
-      const contestPenalty = coneRead.contestStrength * 0.58;
-      const contactPenalty = contactPressure[owner] * 0.2;
-      const assistedBonus = coneRead.defendersInCone === 0 && assistedShotUntil[owner] > currentTime ? assistedShotBonus[owner] : 0;
-      const chance = clamp(baseShotAccuracy(distance) + openBonus + actionBonus + assistedBonus - timingPenalty - stabilityPenalty - contestPenalty - contactPenalty, 0.01, 0.99);
-      ball.shotMake = Math.random() < chance;
-      assistedShotUntil[owner] = 0; assistedShotBonus[owner] = 0;
-      const probabilityLabel = `${Math.round(chance * 100)}%`;
-      if (contactPenalty > 0.035) showMessage(`身体对抗出手 · ${probabilityLabel}`, 780);
-      else if (coneRead.contestStrength > 0.08) {
-        const label = owner === 0
-          ? coneRead.contestStrength > 0.62 ? `严重干扰 · ${probabilityLabel}` : `投篮受干扰 · ${probabilityLabel}`
-          : player.team === 0 ? `队友投篮受干扰 · ${probabilityLabel}` : coneRead.contestStrength > 0.62 ? `强力干扰 · ${probabilityLabel}` : `成功干扰 · ${probabilityLabel}`;
-        showMessage(label, 780);
-      } else if (assistedBonus > 0) showMessage(`战术接球加成 +${Math.round(assistedBonus * 100)}% · ${probabilityLabel}`, 900);
-      else if (stability < 0.72) showMessage(`移动飘投 · ${probabilityLabel}`, 780);
-      else if (actionBonus > 0) showMessage(`动作创造空位 · ${probabilityLabel}`, 780);
-      else showMessage(`空位出手 · ${probabilityLabel}`, 720);
       ball.shotPoints = distance > 7 ? 3 : 2;
-      const aim = target.clone();
-      if (!ball.shotMake) aim.z += (Math.random() > 0.5 ? 1 : -1) * (0.72 + Math.random() * 0.6);
-      const from = getGatherPosition(player);
-      ball.position.copy(from);
-      const t = ball.shotFlight;
-      ball.velocity.set((aim.x - from.x) / t, (aim.y - from.y + 4.9 * t * t) / t, (aim.z - from.z) / t);
+      if (owner === 0 || remoteAim) {
+        const from = remoteAim?.origin ?? getGatherPosition(player);
+        ball.position.copy(from);
+        ball.velocity.copy(aimedShotVelocity(remoteAim?.yaw ?? cameraYaw, remoteAim?.pitch ?? cameraPitch, power));
+        ball.shotFlight = flightTimeToFloor(from.y, ball.velocity.y, BALL_RADIUS);
+        ball.shotMake = false; // Only a real downward crossing of the rim can award points.
+        assistedShotUntil[owner] = 0; assistedShotBonus[owner] = 0;
+        showMessage(`自由瞄准出手 · 力度 ${Math.round(power * 100)}%`, 720);
+      } else {
+        const ideal = clamp(0.54 + distance * 0.012, 0.58, 0.82);
+        const coneRead = readShotCone(owner);
+        const stability = shotStability(owner);
+        const currentTime = performance.now() / 1000;
+        const styleCreatedSpace = appliedStyle !== 'normal';
+        const dribbleCreatedSpace = separationMoveUntil[owner] > currentTime;
+        const actionBonus = coneRead.defendersInCone === 0
+          ? styleCreatedSpace ? 0.09 : dribbleCreatedSpace ? 0.07 : 0
+          : 0;
+        const openBonus = coneRead.defendersInCone === 0 ? 0.1 : 0;
+        const timingPenalty = Math.abs(power - ideal) * (owner === 0 ? 1.35 : 1.1);
+        const stabilityPenalty = (1 - stability) * 0.3;
+        const contestPenalty = coneRead.contestStrength * 0.58;
+        const contactPenalty = contactPressure[owner] * 0.2;
+        const assistedBonus = coneRead.defendersInCone === 0 && assistedShotUntil[owner] > currentTime ? assistedShotBonus[owner] : 0;
+        const chance = clamp(baseShotAccuracy(distance) + openBonus + actionBonus + assistedBonus - timingPenalty - stabilityPenalty - contestPenalty - contactPenalty, 0.01, 0.99);
+        ball.shotMake = Math.random() < chance;
+        assistedShotUntil[owner] = 0; assistedShotBonus[owner] = 0;
+        const probabilityLabel = `${Math.round(chance * 100)}%`;
+        if (contactPenalty > 0.035) showMessage(`身体对抗出手 · ${probabilityLabel}`, 780);
+        else if (coneRead.contestStrength > 0.08) {
+          const label = owner === 0
+            ? coneRead.contestStrength > 0.62 ? `严重干扰 · ${probabilityLabel}` : `投篮受干扰 · ${probabilityLabel}`
+            : player.team === 0 ? `队友投篮受干扰 · ${probabilityLabel}` : coneRead.contestStrength > 0.62 ? `强力干扰 · ${probabilityLabel}` : `成功干扰 · ${probabilityLabel}`;
+          showMessage(label, 780);
+        } else if (assistedBonus > 0) showMessage(`战术接球加成 +${Math.round(assistedBonus * 100)}% · ${probabilityLabel}`, 900);
+        else if (stability < 0.72) showMessage(`移动飘投 · ${probabilityLabel}`, 780);
+        else if (actionBonus > 0) showMessage(`动作创造空位 · ${probabilityLabel}`, 780);
+        else showMessage(`空位出手 · ${probabilityLabel}`, 720);
+        const aim = target.clone();
+        if (!ball.shotMake) aim.z += (Math.random() > 0.5 ? 1 : -1) * (0.72 + Math.random() * 0.6);
+        const from = getGatherPosition(player);
+        ball.position.copy(from);
+        const t = ball.shotFlight;
+        ball.velocity.set((aim.x - from.x) / t, (aim.y - from.y + 4.9 * t * t) / t, (aim.z - from.z) / t);
+      }
       ballSpin.set(ball.velocity.z, 0, -ball.velocity.x).normalize().multiplyScalar(12);
       charging = false; shotPending = false; shotReleaseDelay = 0; shotCharge = 0; dunkCharging = false; dunkPower = 0; dunking = false; dunkElapsed = 0; dunkHasBall = false; dunkResolved = false; dribbling = false; dribbleGrace = 0; dribbleMove = 'forward'; dashTime = 0; setCharge(0); setDunkCharge(0);
     };
@@ -1560,7 +1561,7 @@ export default function Basketball3D() {
       if (!pointerLocked && !dragLooking) return;
       const yawDelta = event.movementX * 0.0019;
       cameraYaw += yawDelta;
-      cameraPitch = clamp(cameraPitch - event.movementY * 0.00155, -1.05, 0.65);
+      cameraPitch = clamp(cameraPitch - event.movementY * 0.00155, -1.05, 1.3);
       athletes[0].facing = Math.PI - cameraYaw;
       if (layingUp && !layupReleased && !layupAcrobatic && layupElapsed > 0.08 && layupElapsed < 0.68) {
         layupViewTurn += yawDelta;
@@ -2910,6 +2911,14 @@ export default function Basketball3D() {
             } else {
               viewActions.get(viewClipName)?.setEffectiveTimeScale(viewPlaybackRate);
             }
+            const viewShot = viewActions.get('Mixamo_Shot');
+            if (viewClipName === 'Mixamo_Shot' && viewShot && (charging || shotPending)) {
+              const duration = viewShot.getClip().duration;
+              const progress = charging ? Math.min(1, shotGatherElapsed / 0.28) * 0.32
+                : 0.32 + Math.min(1, shotAirElapsed / (shotStyle === 'fade' ? 0.35 : shotStyle === 'normal' ? 0.32 : 0.33)) * 0.28;
+              viewShot.time = duration * progress;
+              viewShot.setEffectiveTimeScale(0);
+            }
             viewMixer.update(dt);
           }
           if (player.visual) {
@@ -3084,6 +3093,59 @@ export default function Basketball3D() {
       }
     };
 
+    const arcSamples = 192;
+    const arcGeometry = new THREE.BufferGeometry();
+    const arcPositions = new THREE.BufferAttribute(new Float32Array(arcSamples * 3), 3);
+    arcPositions.setUsage(THREE.DynamicDrawUsage);
+    arcGeometry.setAttribute('position', arcPositions);
+    const arcDistances = new THREE.BufferAttribute(new Float32Array(arcSamples), 1);
+    arcDistances.setUsage(THREE.DynamicDrawUsage);
+    arcGeometry.setAttribute('lineDistance', arcDistances);
+    const arcMaterial = new THREE.LineDashedMaterial({ color: '#9fe9ed', transparent: true, opacity: 0.8, dashSize: 0.18, gapSize: 0.11 });
+    const aimArc = new THREE.Line(arcGeometry, arcMaterial);
+    aimArc.frustumCulled = false;
+    scene.add(aimArc);
+    const landingMarker = new THREE.Mesh(new THREE.RingGeometry(0.19, 0.25, 40), new THREE.MeshBasicMaterial({ color: '#9fe9ed', side: THREE.DoubleSide, transparent: true, opacity: 0.8 }));
+    scene.add(landingMarker);
+    const previewPoint = new THREE.Vector3();
+    const previousPreviewPoint = new THREE.Vector3();
+    const updateAimGuide = () => {
+      const visible = phaseRef.current === 'playing' && ball.owner === 0 && !layingUp && !dunkCharging && !dunking;
+      aimArc.visible = landingMarker.visible = visible;
+      if (!visible) return;
+      const power = charging ? shotCharge : shotPending ? pendingShotPower : 0.55;
+      const origin = getGatherPosition(athletes[0]);
+      const velocity = aimedShotVelocity(cameraYaw, cameraPitch, power);
+      const duration = flightTimeToFloor(origin.y, velocity.y, BALL_RADIUS);
+      let count = arcSamples;
+      let floorLanding = true;
+      let lineDistance = 0;
+      for (let i = 0; i < arcSamples; i++) {
+        flightPoint(origin, velocity, duration * i / (arcSamples - 1), previewPoint);
+        const boardContact = Math.abs(Math.abs(previewPoint.x) - BACKBOARD_X) < BALL_RADIUS + 0.07
+          && Math.abs(previewPoint.z) < BACKBOARD_HALF_Z + BALL_RADIUS
+          && previewPoint.y > BACKBOARD_MIN_Y - BALL_RADIUS && previewPoint.y < BACKBOARD_MAX_Y + BALL_RADIUS;
+        const rimContact = Math.abs(previewPoint.y - HOOP_HEIGHT) < BALL_RADIUS + RIM_TUBE_RADIUS
+          && Math.abs(Math.hypot(Math.abs(previewPoint.x) - HOOP_X, previewPoint.z) - RIM_RADIUS) < BALL_RADIUS + RIM_TUBE_RADIUS;
+        const boundary = Math.abs(previewPoint.x) >= COURT_HALF_X - BALL_RADIUS || Math.abs(previewPoint.z) >= COURT_HALF_Z - BALL_RADIUS;
+        previewPoint.y = Math.max(BALL_RADIUS, previewPoint.y);
+        if (i > 0) lineDistance += previewPoint.distanceTo(previousPreviewPoint);
+        arcDistances.setX(i, lineDistance);
+        previousPreviewPoint.copy(previewPoint);
+        arcPositions.setXYZ(i, previewPoint.x, previewPoint.y, previewPoint.z);
+        if (i > 0 && (boardContact || rimContact || boundary)) { count = i + 1; floorLanding = false; break; }
+      }
+      arcGeometry.setDrawRange(0, count);
+      arcPositions.needsUpdate = true;
+      arcDistances.needsUpdate = true;
+      arcMaterial.color.set(charging || shotPending ? '#ffce82' : '#9fe9ed');
+      arcMaterial.opacity = charging || shotPending ? 0.95 : 0.45;
+      landingMarker.material.color.copy(arcMaterial.color);
+      landingMarker.position.copy(previewPoint);
+      if (floorLanding) { landingMarker.position.y = 0.07; landingMarker.rotation.set(-Math.PI / 2, 0, 0); }
+      else landingMarker.lookAt(camera.position);
+    };
+
     const mapPeerOwner = (owner: number | null) => owner === 0 ? 3 : owner === 3 ? 0 : owner;
 
     const applyPeerWorld = (dt: number, now: number) => {
@@ -3118,7 +3180,13 @@ export default function Basketball3D() {
         const command = peerCommands.shift();
         if (!command) continue;
         if (command.kind === 'shot') {
-          if (ball.owner === 3) releaseShot(3, clamp(command.power, 0, 1));
+          if (ball.owner !== 3 || ![command.power, command.yaw, command.pitch].every(Number.isFinite)
+            || !Array.isArray(command.origin) || command.origin.length !== 3 || !command.origin.every(Number.isFinite)) continue;
+          // Guests see a mirrored court: transform their release point and yaw into host space.
+          const origin = new THREE.Vector3(-command.origin[0], command.origin[1], command.origin[2]);
+          if (Math.hypot(origin.x - remote.position.x, origin.z - remote.position.z) > 2.5
+            || origin.y < 0.3 || origin.y > 5.5) continue;
+          releaseShot(3, clamp(command.power, 0, 1), 'normal', { yaw: -command.yaw, pitch: clamp(command.pitch, -1.05, 1.3), origin });
         } else if (command.kind === 'layup') {
           if (ball.owner === 3) startAiLayup(3, readDrivingLane(3).pressure, command.acrobatic);
         } else if (command.kind === 'dunk') {
@@ -3228,7 +3296,7 @@ export default function Basketball3D() {
             updatePlayers(dt, now);
             processPeerCommands(now);
             if (layingUp && !layupReleased && layupElapsed >= (layupAcrobatic ? 0.8 : 0.72)) releaseUserLayup();
-            if (charging) { shotCharge += dt * 1.45; if (shotCharge > 1) shotCharge = 0.18; }
+            if (charging) shotCharge = Math.min(1, shotCharge + dt * 0.85);
             if (shotPending) {
               shotReleaseDelay -= dt;
               if (ball.owner !== 0) { shotPending = false; shotStyle = 'normal'; }
@@ -3254,7 +3322,7 @@ export default function Basketball3D() {
             }
           }
           uiAt += dt;
-          if (uiAt > 0.08) { uiAt = 0; setClock(gameTime); setCharge(charging ? shotCharge : 0); setDunkCharge(dunkCharging ? dunkPower : 0); setStamina(athletes[0].stamina); }
+          if (uiAt > 0.08) { uiAt = 0; setClock(gameTime); setCharge(charging ? shotCharge : shotPending ? pendingShotPower : 0); setAimActive(ball.owner === 0 && !layingUp && !dunkCharging && !dunking); setDunkCharge(dunkCharging ? dunkPower : 0); setStamina(athletes[0].stamina); }
         } else {
           athletes.forEach((player, index) => { player.group.position.y = Math.sin(now * 2 + index) * 0.012; });
           updateBall(0, now);
@@ -3276,6 +3344,7 @@ export default function Basketball3D() {
         positions.needsUpdate = true;
       });
       updateCamera(frameDt);
+      updateAimGuide();
       renderer.render(scene, camera);
       frame = requestAnimationFrame(loop);
     };
@@ -3296,10 +3365,13 @@ export default function Basketball3D() {
       woodTexture.dispose(); fabricTexture.dispose(); rubberTexture.dispose();
       renderer.dispose();
       scene.traverse((object) => {
-        if (object instanceof THREE.Mesh) {
+        if (object instanceof THREE.Mesh || object instanceof THREE.Line) {
           object.geometry.dispose();
           const materials = Array.isArray(object.material) ? object.material : [object.material];
-          materials.forEach((material) => material.dispose());
+          materials.forEach((material) => {
+            Object.values(material).forEach(value => { if (value instanceof THREE.Texture) value.dispose(); });
+            material.dispose();
+          });
         }
       });
     };
@@ -3321,10 +3393,15 @@ export default function Basketball3D() {
       {message && <div className="event3d">{message}</div>}
       {blockImpact && <div className="blockImpact3d" aria-live="assertive"><strong>BLOCK!</strong><span>封盖成功</span></div>}
       {phase === 'playing' && <>
+        <div className={`aimReticle3d ${aimActive ? 'ready' : ''} ${charge > 0 ? 'charging' : ''}`} aria-label="准星">
+          <svg viewBox="0 0 64 64" aria-hidden="true"><circle className="aimTrack3d" cx="32" cy="32" r="23"/><circle className="aimPower3d" cx="32" cy="32" r="23" pathLength="100" strokeDasharray={`${charge * 100} 100`}/><path d="M32 3v6M32 55v6M3 32h6M55 32h6"/><circle className="aimDot3d" cx="32" cy="32" r="2"/></svg>
+          {aimActive && <span>{charge > 0 ? `力度 ${Math.round(charge * 100)}%` : '按住左键蓄力'}</span>}
+        </div>
+        {aimActive && <div className="aimHint3d">抬高准星控制弧度 · 松开左键投出<span>虚线预估首次碰撞前轨迹</span></div>}
         <div className="room3d"><span>Room code: <b>{onlineMatch?.room.code ?? (gameMode === '1v1' ? '1101' : gameMode === 'practice' ? 'FREE' : '1844')}</b></span><span>Region: asia</span><span>Type: {onlineMatch ? '1V1 online' : gameMode === '1v1' ? '1V1 local' : gameMode === 'practice' ? 'SOLO practice' : '3V3 local'}</span><em>{onlineMatch ? '● P2P' : '⌁ Local'}</em></div>
         <div className="chat3d"><button className="exit3d" onClick={()=>changePhase('paused')}>Exit <kbd>P</kbd></button><div><button onClick={()=>setMessage('PASS!')}>PASS <kbd>1</kbd></button><button onClick={()=>setMessage('NICE!')}>NICE <kbd>2</kbd></button><button onClick={()=>setMessage('SORRY!')}>SORRY <kbd>3</kbd></button><span>CHAT</span></div></div>
-        <div className="guide3d"><span>Jump / Block <kbd>LMB</kbd></span><span>Steal <kbd>Shift</kbd></span>{gameMode === '3v3' && <span>Pass / Call <kbd>F</kbd></span>}<span>Dash <kbd>Space</kbd></span><span>Dribble + Move <kbd>RMB</kbd></span><span>Burst Combo <kbd>RMB + Space</kbd></span><span>Running Layup <kbd>Run + LMB</kbd></span><span>Acrobatic Layup <kbd>Layup + Turn</kbd></span><span>Side-step Shot <kbd>A/D + Space + LMB</kbd></span><span>Fadeaway <kbd>S + Space + LMB</kbd></span><span>Shoot <kbd>LMB</kbd></span><span>Dunk / Putback <kbd>Tab</kbd></span></div>
-        <div className="status3d"><i title="体力：抢断、跳跃和冲刺共用" role="progressbar" aria-label="共享体力" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(stamina * 100)}><b style={{height:`${stamina * 100}%`}}/></i>{charge > 0 && <i className="charge3d"><b style={{height:`${charge * 100}%`}}/></i>}{dunkCharge > 0 && <i className="dunk3d"><b style={{height:`${dunkCharge * 100}%`}}/></i>}</div>
+        <div className="guide3d"><span>Jump / Block <kbd>LMB</kbd></span><span>Steal <kbd>Shift</kbd></span>{gameMode === '3v3' && <span>Pass / Call <kbd>F</kbd></span>}<span>Dash <kbd>Space</kbd></span><span>Dribble + Move <kbd>RMB</kbd></span><span>Burst Combo <kbd>RMB + Space</kbd></span><span>Running Layup <kbd>Run + LMB</kbd></span><span>Acrobatic Layup <kbd>Layup + Turn</kbd></span><span>Side-step Shot <kbd>A/D + Space + LMB</kbd></span><span>Fadeaway <kbd>S + Space + LMB</kbd></span><span>Aim / Charge <kbd>Hold LMB</kbd></span><span>Dunk / Putback <kbd>Tab</kbd></span></div>
+        <div className="status3d"><progress className="staminaMeter3d" title="体力：抢断、跳跃和冲刺共用" aria-label="共享体力" max={1} value={stamina}/>{charge > 0 && <i className="charge3d"><b style={{height:`${charge * 100}%`}}/></i>}{dunkCharge > 0 && <i className="dunk3d"><b style={{height:`${dunkCharge * 100}%`}}/></i>}</div>
       </>}
 
       {phase === 'menu' && <section className="menu3d">

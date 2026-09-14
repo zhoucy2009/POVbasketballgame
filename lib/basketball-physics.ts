@@ -3,6 +3,22 @@ import * as THREE from 'three';
 export const GRAVITY = 9.8;
 export const FIXED_STEP = 1 / 120;
 
+/** The reticle is the launch direction; neither hoop position nor luck enters this calculation. */
+export function aimedShotVelocity(yaw: number, pitch: number, power: number) {
+  const speed = 4.5 + THREE.MathUtils.clamp(power, 0, 1) * 14;
+  return new THREE.Vector3(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch)).multiplyScalar(speed);
+}
+
+export function flightPoint(origin: THREE.Vector3, velocity: THREE.Vector3, time: number, result = new THREE.Vector3()) {
+  result.copy(origin).addScaledVector(velocity, time);
+  result.y -= 0.5 * GRAVITY * time * time;
+  return result;
+}
+
+export function flightTimeToFloor(height: number, verticalSpeed: number, radius: number) {
+  return (verticalSpeed + Math.sqrt(verticalSpeed * verticalSpeed + 2 * GRAVITY * Math.max(0, height - radius))) / GRAVITY;
+}
+
 /** Exact constant-acceleration flight: independent of rendering frequency. */
 export function advanceFlight(position: THREE.Vector3, velocity: THREE.Vector3, dt: number) {
   position.addScaledVector(velocity, dt);
