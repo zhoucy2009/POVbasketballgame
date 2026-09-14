@@ -184,3 +184,27 @@ export function findGreenWindow(origin: THREE.Vector3, yaw: number, pitch: numbe
   }
   return best;
 }
+
+
+export type AssistedGreenWindow = GreenWindow & { targetLow: number; targetHigh: number; pressure: number };
+/** Broaden timing tolerance; pressure removes the extra help without changing aim. */
+export function widenGreenWindow(base: GreenWindow | null, pressure = 0): AssistedGreenWindow | null {
+  if (!base) return null;
+  const contest = THREE.MathUtils.clamp(pressure, 0, 1);
+  const naturalWidth = base.high - base.low;
+  const openWidth = Math.max(0.18, naturalWidth * 3);
+  const width = naturalWidth + (openWidth - naturalWidth) * (1 - contest) ** 1.3;
+  const center = (base.low + base.high) / 2;
+  return { ...base, low: Math.max(0, center - width / 2), high: Math.min(1, center + width / 2),
+    targetLow: base.low, targetHigh: base.high, pressure: contest };
+}
+
+/** Continuous, monotonic timing assistance, shared by the preview and actual release. */
+export function assistedShotPower(power: number, window: AssistedGreenWindow | null) {
+  const input = THREE.MathUtils.clamp(power, 0, 1);
+  if (!window) return input;
+  const { low, high, targetLow, targetHigh } = window;
+  if (input < low) return targetLow * input / low;
+  if (input > high) return targetHigh + (1 - targetHigh) * (input - high) / (1 - high);
+  return THREE.MathUtils.lerp(targetLow, targetHigh, (input - low) / Math.max(1e-8, high - low));
+}

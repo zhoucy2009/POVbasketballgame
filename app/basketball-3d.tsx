@@ -5,7 +5,7 @@ import * as THREE from 'three';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { closeMotionLoop, fitAnimatedRig } from '@/lib/basketball-animation';
-import { FIXED_STEP, advanceFlight, contactImpulse, resolveFloor, acceleratePlanar, aimedShotVelocity, flightTimeToFloor, projectedShotOrigin, shotTiming, PLAYER_GRAVITY, backboardContact, rimContact, forecastShot, findGreenWindow, type GreenWindow } from '@/lib/basketball-physics';
+import { FIXED_STEP, advanceFlight, contactImpulse, resolveFloor, acceleratePlanar, aimedShotVelocity, flightTimeToFloor, projectedShotOrigin, shotTiming, PLAYER_GRAVITY, backboardContact, rimContact, forecastShot, findGreenWindow, widenGreenWindow, assistedShotPower, type GreenWindow, type AssistedGreenWindow } from '@/lib/basketball-physics';
 import { addCourtDetails, addAthleteDetails } from '@/lib/basketball-details';
 import { COURT_THEMES, createCourtWorlds, createAnimalLook, type CourtTheme } from '@/lib/basketball-worlds';
 import OnlineLobby from '@/components/online-lobby';
@@ -148,7 +148,7 @@ export default function Basketball3D() {
   const [clock, setClock] = useState(90);
   const [charge, setCharge] = useState(0);
   const [aimActive, setAimActive] = useState(false);
-  const [greenWindow, setGreenWindow] = useState<GreenWindow | null>(null);
+  const [greenWindow, setGreenWindow] = useState<AssistedGreenWindow | null>(null);
   const [dunkCharge, setDunkCharge] = useState(0);
   const [stamina, setStamina] = useState(1);
   const [message, setMessage] = useState('');
@@ -817,7 +817,8 @@ export default function Basketball3D() {
     const shotAirStart = new THREE.Vector3();
     const shotAirEnd = new THREE.Vector3();
     const pendingShotOrigin = new THREE.Vector3();
-    let currentGreenWindow: GreenWindow | null = null;
+    let currentGreenWindow: AssistedGreenWindow | null = null;
+    let naturalGreenWindow: GreenWindow | null = null;
     let greenCheckAt = 0;
     let layingUp = false;
     let layupElapsed = 0;
@@ -1024,12 +1025,13 @@ export default function Basketball3D() {
       return left.add(right).multiplyScalar(0.5).add(new THREE.Vector3(0, BALL_RADIUS * 0.22, 0));
     };
 
-    const readShotCone = (owner: number, radius = SHOT_CONE_RADIUS, halfAngle = SHOT_CONE_HALF_ANGLE) => {
+    const readShotCone = (owner: number, radius = SHOT_CONE_RADIUS, halfAngle = SHOT_CONE_HALF_ANGLE, aimYaw?: number) => {
       const shooter = athletes[owner];
       const rim = hoop(shooter.team).setY(0);
       const towardRim = rim.clone().sub(shooter.position); towardRim.y = 0;
       if (towardRim.lengthSq() < 0.001) towardRim.set(shooter.team === 0 ? 1 : -1, 0, 0);
       towardRim.normalize();
+      if (aimYaw !== undefined) towardRim.set(Math.sin(aimYaw), 0, -Math.cos(aimYaw));
       const coneCosine = Math.cos(halfAngle);
       let defendersInCone = 0;
       let contestStrength = 0;
@@ -1055,6 +1057,12 @@ export default function Basketball3D() {
       });
       if (defendersInCone > 1) contestStrength += Math.min(0.14, (defendersInCone - 1) * 0.07);
       return { defendersInCone, contestStrength: clamp(contestStrength, 0, 1), nearestDistance };
+    };
+
+    const getShotPressure = (owner: number, yaw: number) => {
+      const contest = readShotCone(owner, 3.6, Math.PI * 0.4, yaw).contestStrength;
+      const contact = clamp(contactPressure[owner], 0, 1);
+      return clamp(1 - (1 - contest) * (1 - contact * 0.85), 0, 1);
     };
 
     const shotStability = (owner: number) => {
@@ -1263,11 +1271,13 @@ export default function Basketball3D() {
       if (owner === 0 || remoteAim) {
         const from = remoteAim?.origin ?? plannedShotOrigin();
         ball.position.copy(from);
-        ball.velocity.copy(aimedShotVelocity(remoteAim?.yaw ?? cameraYaw, remoteAim?.pitch ?? cameraPitch, power));
+        const yaw = remoteAim?.yaw ?? cameraYaw, pitch = remoteAim?.pitch ?? cameraPitch;
+        const releaseWindow = widenGreenWindow(findGreenWindow(from, yaw, pitch, target.x), getShotPressure(owner, yaw));
+        ball.velocity.copy(aimedShotVelocity(yaw, pitch, assistedShotPower(power, releaseWindow)));
         ball.shotFlight = flightTimeToFloor(from.y, ball.velocity.y, BALL_RADIUS);
         ball.shotMake = false; // Only a real downward crossing of the rim can award points.
         assistedShotUntil[owner] = 0; assistedShotBonus[owner] = 0;
-        const green = owner === 0 && currentGreenWindow && power >= currentGreenWindow.low && power <= currentGreenWindow.high;
+        const green = releaseWindow && power >= releaseWindow.low && power <= releaseWindow.high;
         showMessage(green ? 'GREEN! · 精准出手' : `自由瞄准出手 · 力度 ${Math.round(power * 100)}%`, 720);
       } else {
         const ideal = clamp(0.54 + distance * 0.012, 0.58, 0.82);
@@ -3125,10 +3135,14 @@ export default function Basketball3D() {
       const now = performance.now();
       if (now >= greenCheckAt) {
         greenCheckAt = now + 160;
-        currentGreenWindow = findGreenWindow(origin, cameraYaw, cameraPitch);
-        setGreenWindow(currentGreenWindow);
+        naturalGreenWindow = findGreenWindow(origin, cameraYaw, cameraPitch);
       }
-      const forecast = forecastShot(origin, cameraYaw, cameraPitch, power);
+      currentGreenWindow = widenGreenWindow(naturalGreenWindow, getShotPressure(0, cameraYaw));
+      const nextWindow = currentGreenWindow;
+      setGreenWindow(previous => !previous && !nextWindow || previous && nextWindow
+        && Math.abs(previous.low - nextWindow.low) < 0.002 && Math.abs(previous.high - nextWindow.high) < 0.002
+        && Math.abs(previous.pressure - nextWindow.pressure) < 0.02 && previous.banked === nextWindow.banked ? previous : nextWindow);
+      const forecast = forecastShot(origin, cameraYaw, cameraPitch, assistedShotPower(power, currentGreenWindow));
       const count = Math.min(arcSamples, forecast.points.length);
       let lineDistance = 0;
       for (let i = 0; i < count; i++) {
@@ -3418,7 +3432,7 @@ export default function Basketball3D() {
         <div className="chat3d"><button className="exit3d" onClick={()=>changePhase('paused')}>Exit <kbd>P</kbd></button><div><button onClick={()=>setMessage('PASS!')}>PASS <kbd>1</kbd></button><button onClick={()=>setMessage('NICE!')}>NICE <kbd>2</kbd></button><button onClick={()=>setMessage('SORRY!')}>SORRY <kbd>3</kbd></button><span>CHAT</span></div></div>
         <div className="guide3d"><span>Jump / Block <kbd>LMB</kbd></span><span>Steal <kbd>Shift</kbd></span>{gameMode === '3v3' && <span>Pass / Call <kbd>F</kbd></span>}<span>Dash <kbd>Space</kbd></span><span>Dribble + Move <kbd>RMB</kbd></span><span>Burst Combo <kbd>RMB + Space</kbd></span><span>Running Layup <kbd>Run + LMB</kbd></span><span>Acrobatic Layup <kbd>Layup + Turn</kbd></span><span>Side-step Shot <kbd>A/D + Space + LMB</kbd></span><span>Fadeaway <kbd>S + Space + LMB</kbd></span><span>Aim / Charge <kbd>Hold LMB</kbd></span><span>Dunk / Putback <kbd>Tab</kbd></span></div>
         {aimActive && <div className="shotMeter3d">
-          <div className="shotMeterLabels"><span>出手力度</span><strong>{greenWindow ? `${greenWindow.banked ? '打板' : '空心'}绿区 ${Math.round(greenWindow.low * 100)}–${Math.round(greenWindow.high * 100)}%` : '调整准星寻找绿区'}</strong></div>
+          <div className="shotMeterLabels"><span>出手力度</span><strong>{greenWindow ? `${greenWindow.pressure > 0.7 ? '强干扰' : greenWindow.pressure > 0.3 ? '受干扰' : greenWindow.pressure > 0.08 ? '轻干扰' : '空位'} · ${greenWindow.banked ? '打板' : '投篮'}绿区 ${Math.round(greenWindow.low * 100)}–${Math.round(greenWindow.high * 100)}%` : '调整准星寻找绿区'}</strong></div>
           <div className="shotMeterTrack"><i style={{width:`${charge * 100}%`}}/>{greenWindow && <b style={{left:`${greenWindow.low * 100}%`,width:`${Math.max(1, (greenWindow.high-greenWindow.low)*100)}%`}}/>}<em style={{left:`${charge * 100}%`}}/></div>
         </div>}
         <div className="status3d"><progress className="staminaMeter3d" title="体力：抢断、跳跃和冲刺共用" aria-label="共享体力" max={1} value={stamina}/>{charge > 0 && <i className="charge3d"><b style={{height:`${charge * 100}%`}}/></i>}{dunkCharge > 0 && <i className="dunk3d"><b style={{height:`${dunkCharge * 100}%`}}/></i>}</div>

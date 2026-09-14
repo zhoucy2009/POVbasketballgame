@@ -9,25 +9,25 @@ const source = readFileSync(new URL('../app/basketball-3d.tsx', import.meta.url)
 const ast = ts.createSourceFile('game.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const callbacks = [];
 function visit(node) {
-  if (ts.isVariableDeclaration(node) && ['releaseShot', 'processPeerCommands', 'plannedShotOrigin', 'shotDirection', 'queueUserShot', 'cancelUserShot'].includes(node.name.getText(ast))) callbacks.push(`const ${node.getText(ast)};`);
+  if (ts.isVariableDeclaration(node) && ['readShotCone', 'getShotPressure', 'releaseShot', 'processPeerCommands', 'plannedShotOrigin', 'shotDirection', 'queueUserShot', 'cancelUserShot'].includes(node.name.getText(ast))) callbacks.push(`const ${node.getText(ast)};`);
   ts.forEachChild(node, visit);
 }
 visit(ast);
-const code = ts.transpileModule(`${physics}\n${callbacks.join('\n')}\nglobalThis.api = { releaseShot, processPeerCommands, plannedShotOrigin, queueUserShot, cancelUserShot, aimedShotVelocity, flightPoint, flightTimeToFloor, advanceFlight, projectedShotOrigin, forecastShot, findGreenWindow };`, {compilerOptions: {target: ts.ScriptTarget.ES2022}}).outputText;
+const code = ts.transpileModule(`${physics}\n${callbacks.join('\n')}\nglobalThis.api = { getShotPressure, widenGreenWindow, assistedShotPower, releaseShot, processPeerCommands, plannedShotOrigin, queueUserShot, cancelUserShot, aimedShotVelocity, flightPoint, flightTimeToFloor, advanceFlight, projectedShotOrigin, forecastShot, findGreenWindow };`, {compilerOptions: {target: ts.ScriptTarget.ES2022}}).outputText;
 function harness() {
-  const athletes = Array.from({length: 6}, (_, i) => ({team: i < 3 ? 0 : 1, position: new THREE.Vector3(0, 0, 0), jumpV: 1.4, jump: 0.7, action: 0.5}));
-  const h = {THREE, Math, Number, Array, athletes, BALL_RADIUS: 0.125,
+  const athletes = Array.from({length: 6}, (_, i) => ({team: i < 3 ? 0 : 1, position: new THREE.Vector3(0, 0, 0), jumpV: 1.4, jump: 0.7, action: 0.5, velocity: new THREE.Vector3()}));
+  const h = {THREE, Math, Number, Array, athletes, BALL_RADIUS: 0.125, SHOT_CONE_RADIUS: 3.6, SHOT_CONE_HALF_ANGLE: Math.PI * 0.4,
+    contactPressure: Array(6).fill(0), isActiveIndex: index => index === 0 || index === 3,
     ball: {owner: 0, position: new THREE.Vector3(), velocity: new THREE.Vector3()}, ballSpin: new THREE.Vector3(),
     onlineSessionRef: {current: null}, cameraYaw: Math.PI / 2, cameraPitch: 0.7, shotStyle: 'normal', layupShotActive: false, layupArc: null,
     charging: false, shotPending: true, shotReleaseDelay: 0, shotCharge: 0.65, dunkCharging: false, dunkPower: 0, dunking: false, dunkElapsed: 0, dunkHasBall: false, dunkResolved: false, dribbling: false, dribbleGrace: 0, dribbleMove: 'forward', dashTime: 0,
     assistedShotUntil: [], assistedShotBonus: [], peerCommands: [], sent: [], currentGreenWindow: null,
     pendingShotOrigin: new THREE.Vector3(0.4, 2.9, 0.1), pendingShotPower: 0, shotAirElapsed: 0,
     shotAirStart: new THREE.Vector3(), shotAirEnd: new THREE.Vector3(),
-    clamp: THREE.MathUtils.clamp, hoop: () => new THREE.Vector3(18.7, 3.05, 0),
+    clamp: THREE.MathUtils.clamp, hoop: team => new THREE.Vector3(team === 0 ? 18.7 : -18.7, 3.05, 0),
     getGatherPosition: () => new THREE.Vector3(0.4, 2.7, 0.1),
     showMessage: () => {}, setCharge: () => {}, setDunkCharge: () => {},
     facePoint: () => {throw new Error('human shots must never face the hoop automatically');},
-    readShotCone: () => {throw new Error('human shots must not depend on random accuracy');},
   };
   h.sendPeer = packet => h.sent.push(packet);
   vm.createContext(h); vm.runInContext(code, h); return h;
@@ -111,4 +111,49 @@ test('green window supports bank shots and never rescues a shot facing away', ()
     assert.equal(h.api.forecastShot(origin, 1.1, 0.8, power).made, true);
   }
   assert.equal(h.api.findGreenWindow(origin, -Math.PI / 2, 0.8), null);
+});
+
+
+test('open green timing is widened to 18 percent and contracts with pressure', () => {
+  const h = harness(), base = {low: 0.7, high: 0.72, banked: false};
+  const windows = [0, 0.25, 0.5, 0.75, 1].map(p => h.api.widenGreenWindow(base, p));
+  assert.ok(Math.abs(windows[0].high - windows[0].low - 0.18) < 1e-10);
+  for (let i = 1; i < windows.length; i++) assert.ok(windows[i].high - windows[i].low < windows[i-1].high - windows[i-1].low);
+  assert.equal(windows.at(-1).low, base.low); assert.equal(windows.at(-1).high, base.high);
+  const window = windows[0];
+  let previous = -1;
+  for (let i = 0; i <= 1000; i++) {
+    const mapped = h.api.assistedShotPower(i / 1000, window);
+    assert.ok(mapped >= previous && mapped >= 0 && mapped <= 1); previous = mapped;
+  }
+  assert.equal(h.api.assistedShotPower(0.25, null), 0.25);
+});
+
+test('expanded bank green edges really score with unchanged aim in preview and release', () => {
+  const h = harness(), origin = new THREE.Vector3(14, 2.9, 2);
+  const raw = h.api.findGreenWindow(origin, 1.1, 0.8);
+  const window = h.api.widenGreenWindow(raw, 0);
+  for (let i = 0; i <= 10; i++) {
+    const input = THREE.MathUtils.lerp(window.low, window.high, i / 10);
+    const power = h.api.assistedShotPower(input, window);
+    const preview = h.api.forecastShot(origin, 1.1, 0.8, power);
+    assert.equal(preview.made, true);
+    h.ball.owner = 0; h.shotPending = true; h.pendingShotOrigin.copy(origin); h.cameraYaw = 1.1; h.cameraPitch = 0.8;
+    h.api.releaseShot(0, input);
+    assert.ok(h.ball.velocity.distanceTo(h.api.aimedShotVelocity(1.1, 0.8, power)) < 1e-10);
+  }
+});
+
+test('closer defenders, blocks and contact progressively reduce tolerance; teammates do not', () => {
+  const h = harness(), defender = h.athletes[3]; defender.jump = 0; defender.action = 0;
+  defender.position.set(4, 0, 0); assert.equal(h.api.getShotPressure(0, Math.PI / 2), 0);
+  defender.position.x = 3; const far = h.api.getShotPressure(0, Math.PI / 2);
+  defender.position.x = 1; const near = h.api.getShotPressure(0, Math.PI / 2);
+  defender.jump = 0.7; const block = h.api.getShotPressure(0, Math.PI / 2);
+  assert.ok(far > 0 && near > far && block > near);
+  defender.position.x = -1; defender.jump = 0;
+  assert.equal(h.api.getShotPressure(0, Math.PI / 2), 0);
+  h.contactPressure[0] = 0.7; assert.ok(h.api.getShotPressure(0, Math.PI / 2) > 0.5);
+  h.contactPressure[0] = 0; defender.position.x = 1; defender.team = 0;
+  assert.equal(h.api.getShotPressure(0, Math.PI / 2), 0);
 });
