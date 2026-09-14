@@ -208,3 +208,14 @@ export function assistedShotPower(power: number, window: AssistedGreenWindow | n
   if (input > high) return targetHigh + (1 - targetHigh) * (input - high) / (1 - high);
   return THREE.MathUtils.lerp(targetLow, targetHigh, (input - low) / Math.max(1e-8, high - low));
 }
+
+
+export const BACKCOURT_MAKE_CAP = 0.08;
+export function isBackcourtShot(shooterX: number, rimX: number) {
+  return shooterX * Math.sign(rimX) <= 0;
+}
+/** A failed heave loses launch energy, rather than curving toward or denying a real basket. */
+export function applyShotRangeLimit(velocity: THREE.Vector3, shooterX: number, rimX: number, roll: number) {
+  if (isBackcourtShot(shooterX, rimX) && roll >= BACKCOURT_MAKE_CAP) velocity.clampLength(0, 9);
+  return velocity;
+}

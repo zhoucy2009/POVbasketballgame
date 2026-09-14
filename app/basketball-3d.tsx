@@ -5,7 +5,7 @@ import * as THREE from 'three';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { closeMotionLoop, fitAnimatedRig } from '@/lib/basketball-animation';
-import { FIXED_STEP, advanceFlight, contactImpulse, resolveFloor, acceleratePlanar, aimedShotVelocity, flightTimeToFloor, projectedShotOrigin, shotTiming, PLAYER_GRAVITY, backboardContact, rimContact, forecastShot, findGreenWindow, widenGreenWindow, assistedShotPower, type GreenWindow, type AssistedGreenWindow } from '@/lib/basketball-physics';
+import { FIXED_STEP, advanceFlight, contactImpulse, resolveFloor, acceleratePlanar, aimedShotVelocity, flightTimeToFloor, projectedShotOrigin, shotTiming, PLAYER_GRAVITY, backboardContact, rimContact, forecastShot, findGreenWindow, isBackcourtShot, applyShotRangeLimit, widenGreenWindow, assistedShotPower, type GreenWindow, type AssistedGreenWindow } from '@/lib/basketball-physics';
 import { addCourtDetails, addAthleteDetails } from '@/lib/basketball-details';
 import { COURT_THEMES, createCourtWorlds, createAnimalLook, type CourtTheme } from '@/lib/basketball-worlds';
 import OnlineLobby from '@/components/online-lobby';
@@ -149,6 +149,7 @@ export default function Basketball3D() {
   const [charge, setCharge] = useState(0);
   const [aimActive, setAimActive] = useState(false);
   const [greenWindow, setGreenWindow] = useState<AssistedGreenWindow | null>(null);
+  const [backcourtAim, setBackcourtAim] = useState(false);
   const [dunkCharge, setDunkCharge] = useState(0);
   const [stamina, setStamina] = useState(1);
   const [message, setMessage] = useState('');
@@ -1200,7 +1201,7 @@ export default function Basketball3D() {
     };
 
     const beginShot = () => {
-      if (ball.owner !== 0 || layingUp || dunkCharging || dunking || shotPending) return false;
+      if (ball.owner !== 0 || layingUp || dunkCharging || dunking || shotPending || charging) return false;
       if (beginLayup()) return true;
       const me = athletes[0];
       userShotEntrySpeed = me.velocity.length();
@@ -1209,6 +1210,7 @@ export default function Basketball3D() {
       queuedShotStyle = 'normal'; queuedShotUntil = 0;
       delayedDashAt = 0;
       charging = true; shotCharge = 0; shotGatherElapsed = 0; shotAirElapsed = 0;
+      stealProtectionUntil = 0; // Gathering exposes the ball even after a recent steal.
       dribbling = false; dribbleGrace = 0; dashTime = 0; dashWithBall = false; spinDirection = 0;
       shotStepStart.copy(me.position);
       const gatherDistance = shotStyle === 'fade' ? 0.9 : shotStyle === 'normal' ? 0 : 1.3;
@@ -1222,10 +1224,14 @@ export default function Basketball3D() {
 
     const plannedShotOrigin = () => shotPending ? pendingShotOrigin.clone()
       : projectedShotOrigin(athletes[0].position, cameraYaw, shotStyle, shotDirection(shotStyle));
+    const clearUserShot = () => {
+      charging = false; shotPending = false; shotCharge = 0; pendingShotPower = 0; shotReleaseDelay = 0;
+      shotGatherElapsed = 0; shotAirElapsed = 0; shotStyle = 'normal'; setCharge(0);
+    };
     const cancelUserShot = () => {
       if (!charging && !shotPending) return false;
-      charging = false; shotPending = false; shotCharge = 0; shotReleaseDelay = 0;
-      athletes[0].action = 0; shotStyle = 'normal'; setCharge(0);
+      clearUserShot();
+      athletes[0].action = 0;
       showMessage(athletes[0].jump > 0.05 ? '取消出手 · 持球落地' : '取消蓄力', 650);
       return true;
     };
@@ -1274,13 +1280,14 @@ export default function Basketball3D() {
         const from = remoteAim?.origin ?? plannedShotOrigin();
         ball.position.copy(from);
         const yaw = remoteAim?.yaw ?? cameraYaw, pitch = remoteAim?.pitch ?? cameraPitch;
-        const releaseWindow = widenGreenWindow(findGreenWindow(from, yaw, pitch, target.x), getShotPressure(owner, yaw));
+        const backcourt = isBackcourtShot(player.position.x, target.x);
+        const releaseWindow = backcourt ? null : widenGreenWindow(findGreenWindow(from, yaw, pitch, target.x), getShotPressure(owner, yaw));
         ball.velocity.copy(aimedShotVelocity(yaw, pitch, assistedShotPower(power, releaseWindow)));
         ball.shotFlight = flightTimeToFloor(from.y, ball.velocity.y, BALL_RADIUS);
         ball.shotMake = false; // Only a real downward crossing of the rim can award points.
         assistedShotUntil[owner] = 0; assistedShotBonus[owner] = 0;
         const green = releaseWindow && power >= releaseWindow.low && power <= releaseWindow.high;
-        showMessage(green ? 'GREEN! · 精准出手' : `自由瞄准出手 · 力度 ${Math.round(power * 100)}%`, 720);
+        showMessage(backcourt ? '后场超远投篮 · 命中概率不高于 8%' : green ? 'GREEN! · 精准出手' : `自由瞄准出手 · 力度 ${Math.round(power * 100)}%`, 720);
       } else {
         const ideal = clamp(0.54 + distance * 0.012, 0.58, 0.82);
         const coneRead = readShotCone(owner);
@@ -1317,6 +1324,10 @@ export default function Basketball3D() {
         ball.position.copy(from);
         const t = ball.shotFlight;
         ball.velocity.set((aim.x - from.x) / t, (aim.y - from.y + 4.9 * t * t) / t, (aim.z - from.z) / t);
+      }
+      if (isBackcourtShot(player.position.x, target.x)) {
+        applyShotRangeLimit(ball.velocity, player.position.x, target.x, Math.random());
+        ball.shotFlight = flightTimeToFloor(ball.position.y, ball.velocity.y, BALL_RADIUS);
       }
       ballSpin.set(ball.velocity.z, 0, -ball.velocity.x).normalize().multiplyScalar(12);
       charging = false; shotPending = false; shotReleaseDelay = 0; shotCharge = 0; dunkCharging = false; dunkPower = 0; dunking = false; dunkElapsed = 0; dunkHasBall = false; dunkResolved = false; dribbling = false; dribbleGrace = 0; dribbleMove = 'forward'; dashTime = 0; setCharge(0); setDunkCharge(0);
@@ -1480,7 +1491,7 @@ export default function Basketball3D() {
       if (onlineSessionRef.current?.role === 'guest') {
         sendPeer({ type: 'command', command: { kind: 'steal' } satisfies PeerCommand });
       }
-      if (currentTime < stealProtectionUntil) { showMessage('球权保护中', 520); return; }
+      if (currentTime < stealProtectionUntil && (ball.owner === null || athletes[ball.owner].actionKind !== 'shoot')) { showMessage('球权保护中', 520); return; }
       showMessage('抢断', 450);
       if (ball.owner === null || athletes[ball.owner].team === 0) return;
       const owner = athletes[ball.owner];
@@ -2769,16 +2780,18 @@ export default function Basketball3D() {
           moveToward(player, target, PLAYER_RUN_SPEED * screenSpeed, dt, markReadPosition);
           const reachDistance = horizontalDistance(player.position, mark.position);
           const shootingThreat = ball.owner === markIndex
-            && ((mark.actionKind === 'shoot' || mark.actionKind === 'layup' || mark.actionKind === 'acrobatic-layup') && mark.action > 0.15
-              || markIndex === 0 && (charging || shotPending || layingUp));
+            && (markIndex === 0 ? shotPending || layingUp || dunking
+              : mark.actionKind === 'shoot' && (mark.jump > 0.1 || (aiShotPlans[markIndex]?.releaseAt ?? Infinity) - now <= 0.25)
+                || mark.actionKind === 'layup' || mark.actionKind === 'acrobatic-layup');
           if (shootingThreat && reachDistance < SHOT_CONTEST_RADIUS + 0.28 && player.jump < 0.03 && player.jumpV <= 0 && spendStamina(player, JUMP_STAMINA_COST)) {
             player.jumpV = 6.7;
             player.action = 0.76;
             player.actionKind = 'jump';
+            blockAttemptUntil[index] = now + 0.55;
             player.velocity.multiplyScalar(Math.pow(0.45, dt * 60));
           }
           const markFinishing = mark.actionKind === 'layup' || mark.actionKind === 'acrobatic-layup' || mark.actionKind === 'dunk';
-          if (onBall && !dunking && !markFinishing && ball.owner === markIndex && reachDistance < AI_STEAL_REACH && now >= stealProtectionUntil && player.jumpV <= 0 && spendStamina(player, STEAL_STAMINA_COST)) {
+          if (onBall && !dunking && !markFinishing && ball.owner === markIndex && reachDistance < AI_STEAL_REACH && (now >= stealProtectionUntil || mark.actionKind === 'shoot') && player.jump < 0.15 && player.jumpV <= 0 && spendStamina(player, STEAL_STAMINA_COST)) {
             const ankleBreakChance = dribbleMove === 'spin-left' || dribbleMove === 'spin-right' ? 0.82
               : dribbleMove === 'between' ? 0.7
               : dribbleMove === 'cross-left' || dribbleMove === 'cross-right' ? 0.62
@@ -2789,7 +2802,7 @@ export default function Basketball3D() {
             } else {
               player.action = 0.48; player.actionKind = 'steal';
               const exposed = markIndex !== 0 || !dribbling || (dribblePhase > 0.4 && dribblePhase < 0.58);
-              if (exposed && Math.random() < AI_STEAL_CHANCE) {
+              if (exposed && Math.random() < (markIndex === 0 && charging ? 0.62 : AI_STEAL_CHANCE)) {
                 ball.owner = index; ball.lastOwner = index; ball.mode = 'held'; stealProtectionUntil = now + STEAL_POSSESSION_PROTECTION; showMessage('被抢断！球权保护中', 850);
               }
             }
@@ -3135,11 +3148,13 @@ export default function Basketball3D() {
       const power = charging ? shotCharge : shotPending ? pendingShotPower : 0.55;
       const origin = plannedShotOrigin();
       const now = performance.now();
+      const backcourt = isBackcourtShot(athletes[0].position.x, hoop(athletes[0].team).x);
+      setBackcourtAim(backcourt);
       if (now >= greenCheckAt) {
         greenCheckAt = now + 160;
         naturalGreenWindow = findGreenWindow(origin, cameraYaw, cameraPitch);
       }
-      currentGreenWindow = widenGreenWindow(naturalGreenWindow, getShotPressure(0, cameraYaw));
+      currentGreenWindow = backcourt ? null : widenGreenWindow(naturalGreenWindow, getShotPressure(0, cameraYaw));
       const nextWindow = currentGreenWindow;
       setGreenWindow(previous => !previous && !nextWindow || previous && nextWindow
         && Math.abs(previous.low - nextWindow.low) < 0.002 && Math.abs(previous.high - nextWindow.high) < 0.002
@@ -3156,7 +3171,7 @@ export default function Basketball3D() {
       arcGeometry.setDrawRange(0, count);
       arcPositions.needsUpdate = true;
       arcDistances.needsUpdate = true;
-      arcMaterial.color.set(forecast.made ? '#79ff8b' : forecast.banked ? '#bdb0ff' : charging || shotPending ? '#ffce82' : '#9fe9ed');
+      arcMaterial.color.set(backcourt ? '#e4a166' : forecast.made ? '#79ff8b' : forecast.banked ? '#bdb0ff' : charging || shotPending ? '#ffce82' : '#9fe9ed');
       arcMaterial.opacity = charging || shotPending ? 0.95 : 0.45;
       landingMarker.material.color.copy(arcMaterial.color);
       landingMarker.position.copy(previewPoint);
@@ -3218,7 +3233,7 @@ export default function Basketball3D() {
           spendStamina(remote, command.burst ? 0.34 : 0.26);
         } else if (command.kind === 'steal' && spendStamina(remote, STEAL_STAMINA_COST)) {
           remote.action = 0.62; remote.actionKind = 'steal';
-          if (ball.owner === 0 && now >= stealProtectionUntil && horizontalDistance(remote.position, athletes[0].position) < USER_STEAL_REACH) {
+          if (ball.owner === 0 && (now >= stealProtectionUntil || charging || shotPending) && horizontalDistance(remote.position, athletes[0].position) < USER_STEAL_REACH) {
             if (Math.random() < USER_STEAL_CHANCE) {
               ball.owner = 3; ball.mode = 'held'; ball.lastOwner = 3;
               stealProtectionUntil = now + STEAL_POSSESSION_PROTECTION;
@@ -3320,6 +3335,10 @@ export default function Basketball3D() {
             if (layingUp) layupElapsed += dt;
             updatePlayers(dt, now);
             processPeerCommands(now);
+            if (ball.owner !== 0 && (charging || shotPending)) clearUserShot();
+            if (charging && shotGatherElapsed >= 1.2) {
+              cancelUserShot(); showMessage('蓄力超时 · 请移动或重新组织出手', 900);
+            }
             if (layingUp && !layupReleased && layupElapsed >= (layupAcrobatic ? 0.8 : 0.72)) releaseUserLayup();
             if (charging) shotCharge = Math.min(1, shotCharge + dt * (shotStyle === 'normal' ? 2 : 2.4));
             if (shotPending) {
@@ -3432,12 +3451,12 @@ export default function Basketball3D() {
           <svg viewBox="0 0 64 64" aria-hidden="true"><circle className="aimTrack3d" cx="32" cy="32" r="23"/><circle className="aimPower3d" cx="32" cy="32" r="23" pathLength="100" strokeDasharray={`${charge * 100} 100`}/><path d="M32 3v6M32 55v6M3 32h6M55 32h6"/><circle className="aimDot3d" cx="32" cy="32" r="2"/></svg>
           {aimActive && <span>{charge > 0 ? `力度 ${Math.round(charge * 100)}%` : '按住左键蓄力'}</span>}
         </div>
-        {aimActive && <div className="aimHint3d">起跳后的出手轨迹 · 右键取消蓄力 / 出手<span>紫色：打板反弹 · 绿色：命中路线</span></div>}
+        {aimActive && <div className="aimHint3d">右键取消 · 蓄力最多 1.2 秒<span>紫色：打板反弹 · 绿色：命中路线</span></div>}
         <div className="room3d"><span>Room code: <b>{onlineMatch?.room.code ?? (gameMode === '1v1' ? '1101' : gameMode === 'practice' ? 'FREE' : '1844')}</b></span><span>Region: asia</span><span>Type: {onlineMatch ? '1V1 online' : gameMode === '1v1' ? '1V1 local' : gameMode === 'practice' ? 'SOLO practice' : '3V3 local'}</span><em>{onlineMatch ? '● P2P' : '⌁ Local'}</em></div>
         <div className="chat3d"><button className="exit3d" onClick={()=>changePhase('paused')}>Exit <kbd>P</kbd></button><div><button onClick={()=>setMessage('PASS!')}>PASS <kbd>1</kbd></button><button onClick={()=>setMessage('NICE!')}>NICE <kbd>2</kbd></button><button onClick={()=>setMessage('SORRY!')}>SORRY <kbd>3</kbd></button><span>CHAT</span></div></div>
         <div className="guide3d"><span>Jump / Block <kbd>LMB</kbd></span><span>Steal <kbd>Shift</kbd></span>{gameMode === '3v3' && <span>Pass / Call <kbd>F</kbd></span>}<span>Dash <kbd>Space</kbd></span><span>Dribble + Move <kbd>RMB</kbd></span><span>Burst Combo <kbd>RMB + Space</kbd></span><span>Running Layup <kbd>Run + LMB</kbd></span><span>Acrobatic Layup <kbd>Layup + Turn</kbd></span><span>Side-step Shot <kbd>A/D + Space + LMB</kbd></span><span>Fadeaway <kbd>S + Space + LMB</kbd></span><span>Aim / Charge <kbd>Hold LMB</kbd></span><span>Dunk / Putback <kbd>Tab</kbd></span></div>
         {aimActive && <div className="shotMeter3d">
-          <div className="shotMeterLabels"><span>出手力度</span><strong>{greenWindow ? `${greenWindow.pressure > 0.7 ? '强干扰' : greenWindow.pressure > 0.3 ? '受干扰' : greenWindow.pressure > 0.08 ? '轻干扰' : '空位'} · ${greenWindow.banked ? '打板' : '投篮'}绿区 ${Math.round(greenWindow.low * 100)}–${Math.round(greenWindow.high * 100)}%` : '调整准星寻找绿区'}</strong></div>
+          <div className="shotMeterLabels"><span>出手力度</span><strong>{backcourtAim ? '后场超远 · ≤8%' : greenWindow ? `${greenWindow.pressure > 0.7 ? '强干扰' : greenWindow.pressure > 0.3 ? '受干扰' : greenWindow.pressure > 0.08 ? '轻干扰' : '空位'} · ${greenWindow.banked ? '打板' : '投篮'}绿区 ${Math.round(greenWindow.low * 100)}–${Math.round(greenWindow.high * 100)}%` : '调整准星寻找绿区'}</strong></div>
           <div className="shotMeterTrack"><i style={{width:`${charge * 100}%`}}/>{greenWindow && <b style={{left:`${greenWindow.low * 100}%`,width:`${Math.max(1, (greenWindow.high-greenWindow.low)*100)}%`}}/>}<em style={{left:`${charge * 100}%`}}/></div>
         </div>}
         <div className="status3d"><progress className="staminaMeter3d" title="体力：抢断、跳跃和冲刺共用" aria-label="共享体力" max={1} value={stamina}/>{charge > 0 && <i className="charge3d"><b style={{height:`${charge * 100}%`}}/></i>}{dunkCharge > 0 && <i className="dunk3d"><b style={{height:`${dunkCharge * 100}%`}}/></i>}</div>
