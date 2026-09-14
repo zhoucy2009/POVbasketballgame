@@ -8,10 +8,11 @@ import { closeMotionLoop, fitAnimatedRig } from '@/lib/basketball-animation';
 import { FIXED_STEP, advanceFlight, contactImpulse, resolveFloor, acceleratePlanar, aimedShotVelocity, flightTimeToFloor, projectedShotOrigin, shotTiming, PLAYER_GRAVITY, backboardContact, rimContact, forecastShot, ballTouchesHand, findGreenWindow, isBackcourtShot, applyShotRangeLimit, widenGreenWindow, assistedShotPower, type GreenWindow, type AssistedGreenWindow } from '@/lib/basketball-physics';
 import { addCourtDetails, addAthleteDetails } from '@/lib/basketball-details';
 import { COURT_THEMES, createCourtWorlds, createAnimalLook, type CourtTheme } from '@/lib/basketball-worlds';
+import { HighlightRecorder, matchDecision, type HighlightClip, type HighlightKind } from '@/lib/basketball-highlights';
 import OnlineLobby from '@/components/online-lobby';
 import type { OnlineMatchSession } from '@/lib/multiplayer-types';
 
-type Phase = 'menu' | 'rooms' | 'playing' | 'paused' | 'over';
+type Phase = 'menu' | 'rooms' | 'playing' | 'paused' | 'over' | 'replay';
 type GameMode = '3v3' | '1v1' | 'practice';
 type Team = 0 | 1;
 type BallMode = 'held' | 'shot' | 'pass' | 'loose' | 'dead';
@@ -87,7 +88,7 @@ type BallState = {
   banked?: boolean;
 };
 
-type Runtime = { reset: (mode: GameMode) => void; setJersey: (color: string) => void; setCourt: (theme: CourtTheme) => void };
+type Runtime = { replay: () => void; stopReplay: () => void; nextReplay: () => void; reset: (mode: GameMode) => void; setJersey: (color: string) => void; setCourt: (theme: CourtTheme) => void };
 
 const COLORS = ['#f25565', '#a979ff', '#ffd05f'];
 const BALL_RADIUS = 0.125;
@@ -147,6 +148,9 @@ export default function Basketball3D() {
   const [, setLocked] = useState(false);
   const [score, setScore] = useState<[number, number]>([0, 0]);
   const [clock, setClock] = useState(90);
+  const [overtime, setOvertime] = useState(false);
+  const [highlightCount, setHighlightCount] = useState(0);
+  const [replayInfo, setReplayInfo] = useState({ index: 0, total: 0, label: '' });
   const [charge, setCharge] = useState(0);
   const [aimActive, setAimActive] = useState(false);
   const [greenWindow, setGreenWindow] = useState<AssistedGreenWindow | null>(null);
@@ -861,6 +865,18 @@ export default function Basketball3D() {
     let spinDirection: -1 | 0 | 1 = 0;
     const dashDirection = new THREE.Vector3(1, 0, 0);
     let gameTime = 90;
+    let isOvertime = false;
+    let matchFinished = false;
+    let matchElapsed = 0;
+    let recordAt = -1;
+    const recorder = new HighlightRecorder();
+    let highlights: HighlightClip[] = [];
+    const replayNodes: THREE.Object3D[] = [];
+    const replayNodeIds = new Set<number>();
+    let replayIndex = 0;
+    let replayTime = 0;
+    let replayCameraCut = true;
+    const replayQuaternion = new THREE.Quaternion();
     let gameScore: [number, number] = [0, 0];
     let nextPossession: Team = 0;
     let resetAt = 0;
@@ -902,7 +918,7 @@ export default function Basketball3D() {
     type PeerCommand = { kind: 'shot'; power: number; yaw: number; pitch: number; origin: [number, number, number] } | { kind: 'layup'; acrobatic: boolean } | { kind: 'dash'; burst: boolean } | { kind: 'jump' | 'steal' | 'dunk' };
     let remotePutbackUntil = 0;
     type PeerEvent = { kind: 'block'; blocker: number };
-    type WorldState = { seq: number; ball: { x: number; y: number; z: number; vx: number; vy: number; vz: number; owner: number | null; mode: BallMode }; score: [number, number]; time: number };
+    type WorldState = { seq: number; ball: { x: number; y: number; z: number; vx: number; vy: number; vz: number; owner: number | null; mode: BallMode }; score: [number, number]; time: number; overtime: boolean; finished: boolean };
     let boundPeerChannel: RTCDataChannel | null = null;
     let boundStateChannel: RTCDataChannel | null = null;
     let remotePlayerState: PeerPlayerState | null = null;
@@ -948,7 +964,7 @@ export default function Basketball3D() {
             if (message.type === 'event' && message.event?.kind === 'block' && onlineSessionRef.current?.role === 'guest') {
               const localPlayerBlocked = message.event.blocker === 3;
               showMessage(localPlayerBlocked ? '钉板大帽！' : '被对手封盖！', 1200);
-              if (localPlayerBlocked) showBlockFeedback();
+              if (localPlayerBlocked) { showBlockFeedback(); markHighlight('block', '成功盖帽', 0); }
             }
             if (message.type === 'keyframe') {
               const receivedAt = performance.now() / 1000;
@@ -1114,8 +1130,111 @@ export default function Basketball3D() {
       charging = false; shotCharge = 0; shotStyle = 'normal'; shotPending = false; pendingShotPower = 0; shotReleaseDelay = 0; shotGatherElapsed = 0; shotAirElapsed = 0; queuedShotStyle = 'normal'; queuedShotUntil = 0; delayedDashAt = 0; recentDirection = ''; recentDirectionAt = 0; userShotEntrySpeed = 0; userShotSettleTime = 0; ankleBreakWindow = 0; layingUp = false; layupElapsed = 0; layupReleased = false; layupAcrobatic = false; layupViewTurn = 0; layupShotActive = false; layupArc = null; dunkCharging = false; dunkPower = 0; dunking = false; dunkElapsed = 0; dunkHasBall = false; dunkResolved = false; dribbling = false; dribbleGrace = 0; dribbleMove = 'forward'; dribbleSequenceMove = 'forward'; dribblePhase = 0; dribbleHand = 'right'; dribbleFromHand = 'right'; dribbleToHand = 'right'; dashTime = 0; dashCooldown = 0; spinDirection = 0; resetAt = 0; stealProtectionUntil = 0; contactCameraKick = 0; contactMessageAt = 0; tacticCallMessageAt = 0; defenderReactionMessageAt = 0; pendingPassReward = null; lobPassActive = false; teamTactics[0] = null; teamTactics[1] = null;
     };
 
+    const captureHighlightFrame = (force = false) => {
+      if (modeRef.current === 'practice' || (!force && matchElapsed - recordAt < 0.05)) return;
+      recordAt = matchElapsed;
+      if (force) {
+        athletes.forEach(player => player.group.position.set(player.position.x, player.jump, player.position.z));
+        ball.group.position.copy(ball.position);
+      }
+      [...athletes.filter((_, index) => isActiveIndex(index)).map(player => player.group), ball.group].forEach(root => {
+        root.traverse(node => {
+          if (!replayNodeIds.has(node.id)) { replayNodeIds.add(node.id); replayNodes.push(node); }
+        });
+      });
+      const pose = new Float32Array(replayNodes.length * 8);
+      replayNodes.forEach((node, index) => {
+        const offset = index * 8;
+        node.position.toArray(pose, offset); node.quaternion.toArray(pose, offset + 3);
+        pose[offset + 7] = Number(node.visible);
+      });
+      recorder.add({ time: matchElapsed, pose });
+    };
+    const markHighlight = (kind: HighlightKind, label: string, actor: number) => {
+      if (matchFinished || modeRef.current === 'practice' || athletes[actor]?.team !== 0) return;
+      recorder.mark(kind, label, actor, matchElapsed);
+    };
+    const selectReplay = (index: number) => {
+      replayIndex = index;
+      const clip = highlights[index];
+      if (!clip) { changePhase('over'); return; }
+      replayTime = clip.frames[0].time;
+      replayCameraCut = true;
+      setReplayInfo({ index: index + 1, total: highlights.length, label: clip.label });
+    };
+    const startReplay = () => {
+      if (!highlights.length) return;
+      setMessage(''); setBlockImpact(false);
+      changePhase('replay'); selectReplay(0);
+      document.exitPointerLock?.();
+    };
+    const finishMatch = () => {
+      if (matchFinished) return;
+      // Freeze the authoritative result before replay changes scene transforms.
+      captureHighlightFrame(true);
+      matchFinished = true;
+      highlights = recorder.finish();
+      setHighlightCount(highlights.length); setScore([...gameScore]); setClock(gameTime);
+      clearUserShot(); setAimActive(false); setDunkCharge(0); setMessage('');
+      Object.keys(keys).forEach(key => { keys[key] = false; });
+      if (onlineSessionRef.current?.role === 'host') {
+        networkSendAt = 0; reliableKeyframeAt = 0; syncPeerState(performance.now() / 1000);
+      }
+      changePhase('over');
+      if (highlights.length) startReplay();
+      document.exitPointerLock?.();
+    };
+    const checkMatchEnd = () => {
+      if (onlineSessionRef.current?.role === 'guest' || matchFinished) return;
+      const decision = matchDecision(modeRef.current, gameTime, gameScore, isOvertime);
+      if (decision === 'finished') finishMatch();
+      else if (decision === 'overtime' && !isOvertime) {
+        isOvertime = true; setOvertime(true); setClock(0);
+        showMessage('平局 · 进入加时赛！先进球的一方获胜', 3500);
+      }
+    };
+    const renderReplay = (dt: number) => {
+      const clip = highlights[replayIndex];
+      if (!clip) return;
+      replayTime += dt * 0.8;
+      const lastFrame = clip.frames[clip.frames.length - 1];
+      if (replayTime > lastFrame.time + 0.8) { selectReplay(replayIndex + 1); return; }
+      let after = clip.frames.findIndex(frame => frame.time >= replayTime);
+      if (after < 0) after = clip.frames.length - 1;
+      const a = clip.frames[Math.max(0, after - 1)];
+      const b = clip.frames[after];
+      const mix = clamp((replayTime - a.time) / Math.max(0.001, b.time - a.time), 0, 1);
+      replayNodes.forEach((node, index) => {
+        const offset = index * 8;
+        if (offset + 7 >= a.pose.length || offset + 7 >= b.pose.length) { node.visible = false; return; }
+        node.position.set(
+          THREE.MathUtils.lerp(a.pose[offset], b.pose[offset], mix),
+          THREE.MathUtils.lerp(a.pose[offset + 1], b.pose[offset + 1], mix),
+          THREE.MathUtils.lerp(a.pose[offset + 2], b.pose[offset + 2], mix),
+        );
+        node.quaternion.fromArray(a.pose, offset + 3).slerp(replayQuaternion.fromArray(b.pose, offset + 3), mix);
+        node.visible = Boolean(a.pose[offset + 7]);
+      });
+      athletes.forEach((player, index) => { player.group.visible = isActiveIndex(index); });
+      if (viewModel) viewModel.visible = false;
+      updateAimGuide();
+      const actor = athletes[clip.actor].group.position;
+      const focus = actor.clone().lerp(ball.group.position, 0.4);
+      focus.y = Math.max(1.3, focus.y);
+      const distance = clamp(actor.distanceTo(ball.group.position) * 0.35 + 6, 6, 12);
+      const cameraTarget = focus.clone().add(new THREE.Vector3(-distance * 0.65, distance * 0.65, distance));
+      if (replayCameraCut) { camera.position.copy(cameraTarget); replayCameraCut = false; }
+      else camera.position.lerp(cameraTarget, 1 - Math.exp(-dt * 6));
+      camera.lookAt(focus);
+      scene.updateMatrixWorld(true);
+    };
+
     const resetGame = (mode: GameMode) => {
       modeRef.current = mode;
+      isOvertime = false; matchFinished = false; matchElapsed = 0; recordAt = -1;
+      recorder.clear(); highlights = []; replayNodes.length = 0; replayNodeIds.clear();
+      setOvertime(false); setHighlightCount(0);
+      Object.keys(keys).forEach(key => { keys[key] = false; });
       const duration = mode === '1v1' ? 60 : mode === 'practice' ? 0 : 90;
       remotePlayerState = null; remotePlayerReceivedAt = 0; remotePlayerSequence = -1;
       latestWorldState = null; latestWorldReceivedAt = 0; latestWorldSequence = -1;
@@ -1678,7 +1797,7 @@ export default function Basketball3D() {
     };
 
     const scoreBasket = (team: Team, points: number, now: number) => {
-      if (ball.scored) return;
+      if (ball.scored || matchFinished || phaseRef.current !== 'playing') return;
       layupShotActive = false;
       layupArc = null;
       ball.scored = true; ball.mode = 'dead'; ball.owner = null;
@@ -1687,7 +1806,9 @@ export default function Basketball3D() {
       gameScore[team] += points; setScore([...gameScore] as [number, number]);
       nextPossession = modeRef.current === 'practice' ? 0 : team === 0 ? 1 : 0;
       resetAt = now + 1.35;
+      markHighlight('score', `${isOvertime ? '加时绝杀 · ' : ''}${points} 分命中`, ball.lastOwner);
       showMessage(points === 3 ? '三分命中！' : '进球！', 1050);
+      if (isOvertime) finishMatch();
     };
 
     const nearestDefenderDistance = (playerIndex: number) => athletes.reduce((nearest, defender, defenderIndex) => {
@@ -2224,12 +2345,17 @@ export default function Basketball3D() {
             const coneRead = readShotCone(0, 2.25, Math.PI * 0.28);
             const contactPenalty = contactPressure[0] * 0.18;
             const makeChance = clamp((dunkIsPutback ? 0.44 : dunkWasPerfect ? 0.97 : 0.91) + (coneRead.defendersInCone === 0 ? 0.01 : 0) - coneRead.contestStrength * 0.62 - contactPenalty, 0.02, 0.98);
-            const blocked = findHandBlocker(player.team, ball.position, ball.position, now) >= 0;
+            const dunkBlocker = findHandBlocker(player.team, ball.position, ball.position, now);
+            const blocked = dunkBlocker >= 0;
             const madeDunk = !blocked && Math.random() < makeChance;
             dunkResolved = true;
             ball.owner = null; ball.lastOwner = 0; dunkHasBall = false;
             player.action = 0;
             if (blocked) {
+              markHighlight('block', '封盖扣篮', dunkBlocker);
+              if (onlineSessionRef.current?.role === 'host') {
+                sendPeer({ type: 'event', event: { kind: 'block', blocker: dunkBlocker } satisfies PeerEvent });
+              }
               ball.mode = 'loose'; ball.shotAge = 0;
               ball.position.copy(rim).add(new THREE.Vector3(0, 0.12, 0));
               ball.velocity.set(-Math.sign(rim.x - player.position.x) * 3.6, 3.4, (Math.random() - 0.5) * 4.2);
@@ -2347,6 +2473,7 @@ export default function Basketball3D() {
           if (ball.position.distanceTo(target.position.clone().add(new THREE.Vector3(0, catchHeight, 0))) < (lobPassActive ? 1.3 : 1.05)) {
             const receiver = ball.passTarget;
             const completedLob = lobPassActive;
+            markHighlight('teamwork', completedLob ? '空中接力配合' : '传球配合', ball.lastOwner);
             ball.owner = receiver; ball.lastOwner = receiver; ball.mode = 'held'; ball.passTarget = null; lobPassActive = false;
             if (pendingPassReward?.receiver === receiver && pendingPassReward.expiresAt >= now) {
               assistedShotBonus[receiver] = pendingPassReward.bonus;
@@ -2411,6 +2538,7 @@ export default function Basketball3D() {
           ball.velocity.set(-ball.velocity.x * 0.72, 5.1, -ball.velocity.z * 0.4 + (Math.random() - 0.5) * 4.2);
           shooter.action = Math.max(shooter.action, 0.58); shooter.actionKind = 'stumble';
           blockAttemptUntil[blockerIndex] = 0;
+          markHighlight('block', '成功盖帽', blockerIndex);
           showMessage(blockerIndex === 0 ? '钉板大帽！' : '被对手封盖！', 1200);
           if (blockerIndex === 0) showBlockFeedback();
           if (onlineSessionRef.current?.role === 'host') {
@@ -3202,10 +3330,15 @@ export default function Basketball3D() {
       ball.group.position.copy(ball.position);
       const nextScore: [number, number] = [world.score[1], world.score[0]];
       if (gameScore[0] !== nextScore[0] || gameScore[1] !== nextScore[1]) {
+        if (nextScore[0] > gameScore[0]) markHighlight('score', `${world.overtime ? '加时绝杀 · ' : ''}${nextScore[0] - gameScore[0]} 分命中`, 0);
         gameScore = nextScore;
         setScore(nextScore);
       }
       gameTime = Math.max(0, world.time - packetAge);
+      if (world.overtime && !isOvertime) {
+        isOvertime = true; setOvertime(true); showMessage('平局 · 进入加时赛！先进球的一方获胜', 3500);
+      }
+      if (world.finished) finishMatch();
       return true;
     };
 
@@ -3259,6 +3392,8 @@ export default function Basketball3D() {
         ball: { x: ball.position.x, y: ball.position.y, z: ball.position.z, vx: ball.velocity.x, vy: ball.velocity.y, vz: ball.velocity.z, owner: ball.owner, mode: ball.mode },
         score: gameScore,
         time: gameTime,
+        overtime: isOvertime,
+        finished: matchFinished,
       } satisfies WorldState : undefined;
       sendState({ type: 'player', player: playerState });
       if (session.role === 'host') {
@@ -3278,6 +3413,9 @@ export default function Basketball3D() {
 
     runtimeRef.current = {
       reset: resetGame,
+      replay: startReplay,
+      stopReplay: () => changePhase('over'),
+      nextReplay: () => selectReplay(replayIndex + 1),
       setCourt,
       setJersey: (color) => {
         athletes.slice(0, 3).forEach((player) => {
@@ -3306,6 +3444,13 @@ export default function Basketball3D() {
     const loop = () => {
       const wallNow = performance.now() / 1000;
       const frameDt = Math.min(0.1, wallNow - last); last = wallNow;
+      if (matchFinished && (phaseRef.current === 'replay' || phaseRef.current === 'over')) {
+        accumulator = 0;
+        if (phaseRef.current === 'replay') renderReplay(frameDt);
+        renderer.render(scene, camera);
+        frame = requestAnimationFrame(loop);
+        return;
+      }
       accumulator += frameDt;
       athletes.forEach(player => player.group.position.set(player.position.x, player.jump, player.position.z));
       ball.group.position.copy(ball.position);
@@ -3320,14 +3465,16 @@ export default function Basketball3D() {
         contactCameraKick = Math.max(0, contactCameraKick - dt * 0.72);
         if (phaseRef.current === 'playing') {
           const guestWaitingForWorld = onlineSessionRef.current?.role === 'guest' && !latestWorldState;
-          if (modeRef.current !== 'practice' && !guestWaitingForWorld) gameTime = Math.max(0, gameTime - dt);
+          matchElapsed += dt;
+          if (modeRef.current !== 'practice' && !isOvertime && !guestWaitingForWorld) gameTime = Math.max(0, gameTime - dt);
+          checkMatchEnd();
+          if (matchFinished) break;
           dribbleGrace = Math.max(0, dribbleGrace - dt); dashCooldown = Math.max(0, dashCooldown - dt); ankleBreakWindow = Math.max(0, ankleBreakWindow - dt);
           if (delayedDashAt && performance.now() >= delayedDashAt) { delayedDashAt = 0; startDash(); }
           const wasDashing = dashTime > 0;
           dashTime = Math.max(0, dashTime - dt);
           if (wasDashing && dashTime === 0) { dashWithBall = false; spinDirection = 0; dribbleMove = dribbling ? resolveDribbleMove(false) : 'forward'; }
           if (!dribbling && dribbleGrace <= 0 && dashTime <= 0) dribbleMove = 'forward';
-          if (modeRef.current !== 'practice' && !guestWaitingForWorld && gameTime <= 0) { changePhase('over'); document.exitPointerLock?.(); }
           if (resetAt && now >= resetAt) resetPositions(nextPossession);
           if (resetAt && ball.mode === 'dead') {
             advanceFlight(ball.position, ball.velocity, dt);
@@ -3368,12 +3515,21 @@ export default function Basketball3D() {
               if (athletes[0].actionKind === 'layup' || athletes[0].actionKind === 'acrobatic-layup') athletes[0].action = 0;
             }
           }
+          if (matchFinished) break;
+          if (resetAt) syncPeerState(now);
           uiAt += dt;
           if (uiAt > 0.08) { uiAt = 0; setClock(gameTime); setAimActive(ball.owner === 0 && !layingUp && !dunkCharging && !dunking); setDunkCharge(dunkCharging ? dunkPower : 0); setStamina(athletes[0].stamina); }
         } else {
           athletes.forEach((player, index) => { player.group.position.y = Math.sin(now * 2 + index) * 0.012; });
           updateBall(0, now);
         }
+      }
+      if (matchFinished) {
+        accumulator = 0;
+        if (phaseRef.current === 'replay') renderReplay(frameDt);
+        renderer.render(scene, camera);
+        frame = requestAnimationFrame(loop);
+        return;
       }
       // Keep the faster timing bar in sync with every rendered frame.
       if (phaseRef.current === 'playing') setCharge(charging ? shotCharge : shotPending ? pendingShotPower : 0);
@@ -3396,6 +3552,7 @@ export default function Basketball3D() {
       if (courtRef.current === 'forest') animalLooks.forEach(look => look.update(wallNow));
       updateCamera(frameDt);
       updateAimGuide();
+      if (phaseRef.current === 'playing') captureHighlightFrame();
       renderer.render(scene, camera);
       frame = requestAnimationFrame(loop);
     };
@@ -3437,11 +3594,11 @@ export default function Basketball3D() {
   const chooseJersey = (color: string) => {
     jerseyRef.current = color; setJersey(color); runtimeRef.current?.setJersey(color);
   };
-  const timeText = gameMode === 'practice' ? '∞' : `${Math.floor(clock / 60)}:${String(Math.ceil(clock % 60)).padStart(2, '0')}`;
+  const timeText = gameMode === 'practice' ? '∞' : overtime ? '加时 · 先进球获胜' : `${Math.floor(Math.ceil(clock) / 60)}:${String(Math.ceil(clock) % 60).padStart(2, '0')}`;
 
   return (
     <main className="game3d">
-      <canvas ref={canvasRef} tabIndex={0} aria-label="第一人称 3D 篮球场" />
+      <canvas ref={canvasRef} tabIndex={0} aria-label={phase === 'replay' ? '我方第三人称集锦' : '第一人称 3D 篮球场'} />
       <header className={`hud3d ${gameMode === 'practice' ? 'practiceHud3d' : ''}`}>
         <div className="score3d home">{score[0]}</div>
         {gameMode === 'practice' ? <strong className="practiceLabel3d">练习得分</strong> : <><i>—</i><div className="score3d away">{score[1]}</div></>}
@@ -3480,11 +3637,17 @@ export default function Basketball3D() {
 
       {(phase === 'rooms' || onlineMatch) && <section className={`roomsPanel3d ${phase === 'rooms' ? '' : 'onlineLobbyKeeper3d'}`}><OnlineLobby onBack={()=>changePhase('menu')} onPractice={startPractice} onMatchStart={startOnlineMatch}/></section>}
 
+      {phase === 'replay' && <section className="replay3d" aria-label="赛后集锦">
+        <div aria-live="polite"><small>我方第三人称集锦 · {replayInfo.index} / {replayInfo.total}</small><h2>{replayInfo.label}</h2><p>得分 · 盖帽 · 配合</p></div>
+        <nav><button onClick={() => runtimeRef.current?.nextReplay()}>下一段</button><button onClick={() => runtimeRef.current?.stopReplay()}>返回赛果</button></nav>
+      </section>}
+
       {(phase === 'paused' || phase === 'over') && <section className="pause3d">
         <p>{phase === 'over' ? 'FINAL SCORE' : 'GAME PAUSED'}</p>
-        <h2>{phase === 'over' ? (score[0] > score[1] ? '你赢了！' : score[0] === score[1] ? '平局！' : '再战一场？') : '暂停'}</h2>
+        <h2>{phase === 'over' ? (score[0] > score[1] ? '你赢了！' : '再战一场？') : '暂停'}</h2>
         {phase === 'over' && <div>{score[0]} <span>:</span> {score[1]}</div>}
-        <button onClick={phase === 'over' ? (onlineMatch ? ()=>leaveOnlineMatch('rooms') : ()=>startGame(gameMode)) : resume}>{phase === 'over' ? (onlineMatch ? '返回在线大厅' : '重新比赛') : '继续比赛'}</button>
+        {phase === 'over' && <><p className="highlightSummary3d">{highlightCount ? `已生成 ${highlightCount} 段我方集锦 · 得分 / 盖帽 / 配合` : '本场暂无我方得分、盖帽或成功配合片段'}</p>{highlightCount > 0 && <button className="secondary" onClick={() => runtimeRef.current?.replay()}>重播第三人称集锦</button>}</>}
+        <button onClick={phase === 'over'  ? (onlineMatch ? ()=>leaveOnlineMatch('rooms') : ()=>startGame(gameMode)) : resume}>{phase === 'over' ? (onlineMatch ? '返回在线大厅' : '重新比赛') : '继续比赛'}</button>
         <button className="secondary" onClick={()=>leaveOnlineMatch('menu')}>返回主菜单</button>
       </section>}
     </main>
