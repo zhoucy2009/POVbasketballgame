@@ -18,7 +18,7 @@ visit(ast);
 assert.equal(callbacks.length, names.length);
 const constants = source.slice(source.indexOf('const COLORS'), source.indexOf('export default function'));
 const physics = readFileSync(new URL('../lib/basketball-physics.ts', import.meta.url), 'utf8').replace(/^import .*;$/mg, '').replace(/export /g, '');
-const code = ts.transpileModule(`${physics}\n${constants}\n${callbacks.join('\n')}\nglobalThis.api = { ${names.join(',')} };`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
+const code = ts.transpileModule(`${physics}\n${constants}\n${callbacks.join('\n')}\nglobalThis.api = { ${names.join(',')}, advanceFlight, aimedShotVelocity, forecastShot, FIXED_STEP };`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
 
 function harness() {
   const athletes = Array.from({length: 6}, (_, i) => ({team: i < 3 ? 0 : 1, stamina: 1, position: new THREE.Vector3(18, 0, 0), jump: 0, jumpV: 0, action: 0, actionKind: 'idle'}));
@@ -130,4 +130,24 @@ test('insufficient stamina does not partially spend or start actions', () => {
   const h = harness(); const me = h.athletes[0]; me.stamina = 0.1;
   h.api.steal(); h.api.jump(); h.api.startDash();
   assert.equal(me.stamina, 0.1); assert.equal(me.jumpV, 0); assert.equal(h.dashTime, 0);
+});
+
+
+test('bank-shot preview matches live board rebound and scores once', () => {
+  const h = harness();
+  h.layupShotActive = false;
+  const origin = new THREE.Vector3(14, 2.9, 2);
+  const preview = h.api.forecastShot(origin, 1.1, 0.8, 0.2);
+  assert.equal(preview.banked, true); assert.equal(preview.made, true);
+  h.ball.position.copy(origin); h.ball.velocity.copy(h.api.aimedShotVelocity(1.1, 0.8, 0.2));
+  h.ballSpin.set(h.ball.velocity.z, 0, -h.ball.velocity.x).normalize().multiplyScalar(12);
+  for (let i = 0; i < 600 && !h.ball.scored; i++) {
+    const previous = h.ball.position.clone();
+    h.api.advanceFlight(h.ball.position, h.ball.velocity, h.api.FIXED_STEP);
+    h.api.resolveBallBackboardCollisions(previous);
+    h.api.detectLegalBasket(previous, i * h.api.FIXED_STEP);
+    if (!h.ball.scored) h.api.resolveBallRimCollisions(previous);
+  }
+  assert.equal(h.ball.banked, true); assert.equal(h.points, 2);
+  assert.ok(h.ball.position.distanceTo(preview.points.at(-1)) < 1e-9);
 });

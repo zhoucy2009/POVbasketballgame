@@ -61,3 +61,126 @@ export function acceleratePlanar(velocity: THREE.Vector3, target: THREE.Vector3,
   const distance = delta.length();
   if (distance > 0) velocity.addScaledVector(delta, Math.min(1, acceleration * dt / distance));
 }
+
+export type JumpShotStyle = 'normal' | 'step-left' | 'step-right' | 'fade';
+export const PLAYER_GRAVITY = 15.5;
+export const shotTiming = (style: JumpShotStyle) => ({
+  delay: style === 'fade' ? 0.35 : style === 'normal' ? 0.32 : 0.33,
+  jumpSpeed: style === 'fade' ? 5.85 : style === 'normal' ? 5.15 : 5.45,
+  airDistance: style === 'fade' ? 1.28 : style === 'normal' ? 0 : 0.92,
+  airDuration: style === 'fade' ? 0.62 : 0.54,
+});
+
+/** A world-space release pocket, evaluated at take-off + release delay, never at current jump height. */
+export function projectedShotOrigin(ground: THREE.Vector3, yaw: number, style: JumpShotStyle, stepDirection = new THREE.Vector3()) {
+  const timing = shotTiming(style);
+  const releaseHeight = 2.05 + timing.jumpSpeed * timing.delay - 0.5 * PLAYER_GRAVITY * timing.delay ** 2;
+  const progress = 1 - (1 - timing.delay / timing.airDuration) ** 3;
+  return ground.clone().setY(releaseHeight)
+    .addScaledVector(stepDirection, timing.airDistance * progress)
+    .add(new THREE.Vector3(Math.sin(yaw) * 0.56 + Math.cos(yaw) * 0.12, 0, -Math.cos(yaw) * 0.56 + Math.sin(yaw) * 0.12));
+}
+
+/** Shared swept-sphere backboard contact for live play and bank-shot previews. */
+export function backboardContact(position: THREE.Vector3, velocity: THREE.Vector3, spin: THREE.Vector3, previous: THREE.Vector3, radius = 0.125) {
+  for (const sign of [-1, 1]) {
+    const planeX = sign * 19.2;
+    const travel = position.x - previous.x;
+    const side = Math.sign(previous.x - planeX) || -Math.sign(travel) || -sign;
+    const surface = planeX + side * (radius + 0.061);
+    const amount = Math.abs(travel) > 1e-8 ? (surface - previous.x) / travel : -1;
+    if (amount >= 0 && amount <= 1 && travel * side < 0) {
+      const y = THREE.MathUtils.lerp(previous.y, position.y, amount);
+      const z = THREE.MathUtils.lerp(previous.z, position.z, amount);
+      if (y >= 2.925 - radius && y <= 4.175 + radius && Math.abs(z) <= 1.05 + radius) {
+        position.set(surface, y, z);
+        contactImpulse(velocity, spin, new THREE.Vector3(side, 0, 0), radius, 0.72);
+        return true;
+      }
+    }
+    if (Math.abs(position.x - planeX) < radius + 0.061 && position.y >= 2.925 - radius && position.y <= 4.175 + radius && Math.abs(position.z) <= 1.05 + radius) {
+      const normal = new THREE.Vector3(Math.sign(position.x - planeX) || side, 0, 0);
+      position.x = planeX + normal.x * (radius + 0.061);
+      contactImpulse(velocity, spin, normal, radius, 0.72);
+      return true;
+    }
+  }
+  return false;
+}
+
+export function rimContact(position: THREE.Vector3, velocity: THREE.Vector3, spin: THREE.Vector3, previous: THREE.Vector3, radius = 0.125) {
+  if (Math.abs(position.y - 3.05) > 0.5 || Math.abs(Math.abs(position.x) - 18.7) > 1.1 || Math.abs(position.z) > 1.1) return false;
+  for (const rimX of [-18.7, 18.7]) for (let sample = 1; sample <= 5; sample++) {
+    const candidate = previous.clone().lerp(position, sample / 5);
+    const radial = new THREE.Vector3(candidate.x - rimX, 0, candidate.z);
+    if (radial.lengthSq() < 1e-6) radial.set(0, 0, 1); else radial.normalize();
+    const nearest = new THREE.Vector3(rimX, 3.05, 0).addScaledVector(radial, 0.48);
+    const separation = candidate.sub(nearest);
+    const distance = separation.length();
+    if (distance >= radius + 0.055) continue;
+    const normal = distance > 0.001 ? separation.divideScalar(distance) : new THREE.Vector3(0, 1, 0);
+    position.copy(nearest).addScaledVector(normal, radius + 0.055);
+    contactImpulse(velocity, spin, normal, radius, 0.68);
+    return true;
+  }
+  return false;
+}
+
+export type ShotForecast = { points: THREE.Vector3[]; banked: boolean; made: boolean; miss: number };
+/** Predict the full arc including board/rim rebounds, using the live game's timestep and impulses. */
+export function forecastShot(origin: THREE.Vector3, yaw: number, pitch: number, power: number, rimX = 18.7, collect = true): ShotForecast {
+  const position = origin.clone(), velocity = aimedShotVelocity(yaw, pitch, power);
+  const spin = new THREE.Vector3(velocity.z, 0, -velocity.x).normalize().multiplyScalar(12);
+  const previous = new THREE.Vector3();
+  const result: ShotForecast = { points: collect ? [origin.clone()] : [], banked: false, made: false, miss: Infinity };
+  for (let step = 0; step < 600; step++) {
+    previous.copy(position); advanceFlight(position, velocity, FIXED_STEP);
+    const bank = backboardContact(position, velocity, spin, previous);
+    result.banked ||= bank;
+    if (previous.y >= 3.05 && position.y < 3.05) {
+      const t = (previous.y - 3.05) / (previous.y - position.y);
+      result.miss = Math.min(result.miss, Math.hypot(THREE.MathUtils.lerp(previous.x, position.x, t) - rimX, THREE.MathUtils.lerp(previous.z, position.z, t)));
+      if (result.miss <= 0.34) {
+        result.made = true;
+        if (collect) result.points.push(previous.clone().lerp(position, t).setY(3.05 - 0.125 * 0.7));
+        break;
+      }
+    }
+    const rim = rimContact(position, velocity, spin, previous);
+    if (collect && (step % 4 === 0 || bank || rim)) result.points.push(position.clone());
+    if (position.y <= 0.125 || Math.abs(position.x) >= 20.875 || Math.abs(position.z) >= 11.375) {
+      if (collect) result.points.push(position.clone().setY(Math.max(0.07, position.y)));
+      break;
+    }
+  }
+  return result;
+}
+
+export type GreenWindow = { low: number; high: number; banked: boolean };
+export function findGreenWindow(origin: THREE.Vector3, yaw: number, pitch: number, rimX = 18.7): GreenWindow | null {
+  let best: GreenWindow | null = null, current: GreenWindow | null = null;
+  for (let i = 5; i <= 100; i++) {
+    const result = forecastShot(origin, yaw, pitch, i / 100, rimX, false);
+    if (result.made) {
+      if (!current) current = { low: i / 100, high: i / 100, banked: result.banked };
+      current.high = i / 100;
+      if (!best || current.high - current.low > best.high - best.low) best = { ...current };
+    } else current = null;
+  }
+  if (best) {
+    // Refine both edges so a single successful sample still yields a usable timing window.
+    let outside = Math.max(0, best.low - 0.01), inside = best.low;
+    for (let i = 0; i < 6; i++) {
+      const middle = (outside + inside) / 2;
+      if (forecastShot(origin, yaw, pitch, middle, rimX, false).made) inside = middle; else outside = middle;
+    }
+    best.low = inside;
+    outside = Math.min(1, best.high + 0.01); inside = best.high;
+    for (let i = 0; i < 6; i++) {
+      const middle = (outside + inside) / 2;
+      if (forecastShot(origin, yaw, pitch, middle, rimX, false).made) inside = middle; else outside = middle;
+    }
+    best.high = inside;
+  }
+  return best;
+}

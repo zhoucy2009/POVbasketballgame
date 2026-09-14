@@ -5,8 +5,9 @@ import * as THREE from 'three';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { closeMotionLoop, fitAnimatedRig } from '@/lib/basketball-animation';
-import { FIXED_STEP, advanceFlight, contactImpulse, resolveFloor, acceleratePlanar, aimedShotVelocity, flightPoint, flightTimeToFloor } from '@/lib/basketball-physics';
+import { FIXED_STEP, advanceFlight, contactImpulse, resolveFloor, acceleratePlanar, aimedShotVelocity, flightTimeToFloor, projectedShotOrigin, shotTiming, PLAYER_GRAVITY, backboardContact, rimContact, forecastShot, findGreenWindow, type GreenWindow } from '@/lib/basketball-physics';
 import { addCourtDetails, addAthleteDetails } from '@/lib/basketball-details';
+import { COURT_THEMES, createCourtWorlds, createAnimalLook, type CourtTheme } from '@/lib/basketball-worlds';
 import OnlineLobby from '@/components/online-lobby';
 import type { OnlineMatchSession } from '@/lib/multiplayer-types';
 
@@ -83,9 +84,10 @@ type BallState = {
   shotMake: boolean;
   shotPoints: number;
   scored: boolean;
+  banked?: boolean;
 };
 
-type Runtime = { reset: (mode: GameMode) => void; setJersey: (color: string) => void };
+type Runtime = { reset: (mode: GameMode) => void; setJersey: (color: string) => void; setCourt: (theme: CourtTheme) => void };
 
 const COLORS = ['#f25565', '#a979ff', '#ffd05f'];
 const BALL_RADIUS = 0.125;
@@ -95,13 +97,10 @@ const COURT_HALF_X = COURT_LENGTH / 2;
 const COURT_HALF_Z = COURT_WIDTH / 2;
 const HOOP_X = 18.7;
 const HOOP_HEIGHT = 3.05;
-const RIM_RADIUS = 0.48;
-const RIM_TUBE_RADIUS = 0.055;
 const RIM_SCORE_RADIUS = 0.34;
 const BACKBOARD_X = 19.2;
 const BACKBOARD_HALF_Z = 1.05;
 const BACKBOARD_MIN_Y = 2.925;
-const BACKBOARD_MAX_Y = 4.175;
 const COURT_INSET = 1.1;
 const PLAYER_RUN_SPEED = 4.25;
 const PLAYER_COLLISION_RADIUS = 0.46;
@@ -140,6 +139,8 @@ export default function Basketball3D() {
   const pendingModeRef = useRef<GameMode | null>(null);
   const jerseyRef = useRef(COLORS[0]);
   const modeRef = useRef<GameMode>('3v3');
+  const courtRef = useRef<CourtTheme>('rucker');
+  const [courtTheme, setCourtTheme] = useState<CourtTheme>('rucker');
   const onlineSessionRef = useRef<OnlineMatchSession | null>(null);
   const [phase, setPhase] = useState<Phase>('menu');
   const [, setLocked] = useState(false);
@@ -147,6 +148,7 @@ export default function Basketball3D() {
   const [clock, setClock] = useState(90);
   const [charge, setCharge] = useState(0);
   const [aimActive, setAimActive] = useState(false);
+  const [greenWindow, setGreenWindow] = useState<GreenWindow | null>(null);
   const [dunkCharge, setDunkCharge] = useState(0);
   const [stamina, setStamina] = useState(1);
   const [message, setMessage] = useState('');
@@ -283,6 +285,7 @@ export default function Basketball3D() {
     const rubberTexture = surfaceTexture('rubber');
 
 
+    const streetEnvironment = new THREE.Group(); scene.add(streetEnvironment);
     const cloudMaterial = new THREE.MeshStandardMaterial({ color: '#f5fbff', roughness: 1, flatShading: false, transparent: true, opacity: 0.88 });
     const addCloud = (x: number, y: number, z: number, scale: number) => {
       const cloud = new THREE.Group();
@@ -290,7 +293,7 @@ export default function Basketball3D() {
         const puff = new THREE.Mesh(new THREE.IcosahedronGeometry(s as number, 1), cloudMaterial);
         puff.position.set(px as number,py as number,pz as number); cloud.add(puff);
       });
-      cloud.position.set(x,y,z); cloud.scale.setScalar(scale); scene.add(cloud);
+      cloud.position.set(x,y,z); cloud.scale.setScalar(scale); streetEnvironment.add(cloud);
     };
     addCloud(5,14,-28,2.5); addCloud(-19,11,-23,1.8); addCloud(24,16,-34,2.1); addCloud(-2,19,-42,2.7);
 
@@ -316,9 +319,10 @@ export default function Basketball3D() {
 
     const apron = new THREE.Mesh(new THREE.BoxGeometry(46, 0.12, 27), new THREE.MeshStandardMaterial({ color: '#334c59', roughness: 0.94, bumpMap: rubberTexture, bumpScale: 0.025 }));
     apron.position.y = -0.15; apron.receiveShadow = true; scene.add(apron);
+    const keyPaints: THREE.MeshStandardMaterial[] = [];
     for (const sign of [-1, 1]) {
       const paint = new THREE.Mesh(new THREE.PlaneGeometry(6.5, 4.9), new THREE.MeshStandardMaterial({ color: '#346b7c', roughness: 0.63 }));
-      paint.rotation.x = -Math.PI / 2; paint.position.set(sign * 17.3, 0.024, 0); paint.receiveShadow = true; scene.add(paint);
+      paint.rotation.x = -Math.PI / 2; paint.position.set(sign * 17.3, 0.024, 0); paint.receiveShadow = true; scene.add(paint); keyPaints.push(paint.material);
     }
     const white = new THREE.MeshBasicMaterial({ color: '#fff7df' });
     const line = (x: number, z: number, w: number, d: number) => {
@@ -346,6 +350,7 @@ export default function Basketball3D() {
     ringLine(7.25, -19.2, -1.17, 1.17);
     ringLine(7.25, 19.2, Math.PI - 1.17, Math.PI + 1.17);
 
+    const environmentStart = scene.children.length;
     const wallColors = ['#c9c8c0','#b7bac7','#aeb0c1','#d4d0c7'];
     const wallMat = new THREE.MeshStandardMaterial({ color: wallColors[0], roughness: 0.9, flatShading: false });
     const backWall = new THREE.Mesh(new THREE.BoxGeometry(48, 6.5, 0.6), wallMat);
@@ -386,6 +391,7 @@ export default function Basketball3D() {
       scene.add(building);
     }
 
+    scene.children.slice(environmentStart).forEach(object => streetEnvironment.attach(object));
     const nets: { mesh: THREE.Mesh; rest: Float32Array; energy: number }[] = [];
     const makeHoop = (side: Team) => {
       const sign = side === 0 ? -1 : 1;
@@ -424,7 +430,8 @@ export default function Basketball3D() {
       scene.add(group);
     };
     makeHoop(0); makeHoop(1);
-    addCourtDetails(scene, fabricTexture);
+    addCourtDetails(streetEnvironment, fabricTexture);
+    const courtWorlds = createCourtWorlds(scene, streetEnvironment);
 
     const createAthlete = (color: string, number: number) => {
       const group = new THREE.Group();
@@ -499,6 +506,29 @@ export default function Basketball3D() {
     athletes[0].group.getObjectByName('selector')!.visible = false;
     athletes[0].group.visible = true;
 
+    const animalLooks = new Map<number, ReturnType<typeof createAnimalLook>>();
+    const setCourt = (theme: CourtTheme) => {
+      courtRef.current = theme;
+      courtWorlds.select(theme);
+      floorMaterial.color.set(theme === 'forest' ? '#ae9270' : theme === 'beach' ? '#bfcbb7' : theme === 'hall' ? '#dfb27a' : '#c58a52');
+      floorMaterial.roughness = theme === 'hall' ? 0.36 : 0.64;
+      (apron.material as THREE.MeshStandardMaterial).color.set(theme === 'forest' ? '#647b59' : theme === 'beach' ? '#428e99' : theme === 'hall' ? '#172033' : '#334c59');
+      keyPaints.forEach(mat => mat.color.set(theme === 'hall' ? '#2a1f47' : theme === 'beach' ? '#339eae' : theme === 'forest' ? '#46755b' : '#346b7c'));
+      sun.intensity = theme === 'hall' ? 1.3 : theme === 'forest' ? 2.1 : 3.3;
+      sun.color.set(theme === 'hall' ? '#e4edff' : '#fff0d2');
+      athletes.forEach((player, index) => {
+        animalLooks.get(index)?.setVisible(theme === 'forest');
+        player.rig?.traverse(object => {
+          if (!(object instanceof THREE.Mesh)) return;
+          const entries = Array.isArray(object.material) ? object.material : [object.material];
+          entries.forEach(entry => {
+            if (!(entry instanceof THREE.MeshStandardMaterial)) return;
+            if (entry.name === 'Skin') entry.color.set(theme === 'forest' ? ['#ae794f', '#d88943', '#c9c9ba'][index % 3] : ['#c59070', '#935f46', '#b77952', '#bd8c68', '#80563f', '#cb9b7e'][index]);
+            if (entry.name === 'Purple' || entry.name === 'LightBlue') entry.color.set(theme === 'hall' && player.team === 1 ? entry.name === 'Purple' ? '#6945a4' : '#edbd4d' : player.team === 0 ? jerseyRef.current : '#3789ef');
+          });
+        });
+      });
+    };
     let rigCancelled = false;
     let viewModel: THREE.Group | undefined;
     let viewMixer: THREE.AnimationMixer | undefined;
@@ -675,6 +705,7 @@ export default function Basketball3D() {
         if (primarySkeleton) addAthleteDetails(player.group, primarySkeleton, teamColor, player.number, fabricTexture, index === 0);
         player.rig = model;
         player.visual = visual;
+        if (index !== 0) animalLooks.set(index, createAnimalLook(player.group, model, index));
       });
 
       // Keep the Mixamo geometry intact. A shader mask reveals the animated arms
@@ -744,6 +775,7 @@ export default function Basketball3D() {
       viewClips.forEach((clip) => viewActions?.set(clip.name, viewMixer!.clipAction(clip)));
       viewActions.get('Mixamo_Run')?.reset().setEffectiveTimeScale(0.68).play();
       athletes[0].group.visible = false;
+      setCourt(courtRef.current);
     }).catch((error) => console.error('Character rig failed to load', error));
 
     const ballGroup = new THREE.Group();
@@ -784,6 +816,9 @@ export default function Basketball3D() {
     const shotStepEnd = new THREE.Vector3();
     const shotAirStart = new THREE.Vector3();
     const shotAirEnd = new THREE.Vector3();
+    const pendingShotOrigin = new THREE.Vector3();
+    let currentGreenWindow: GreenWindow | null = null;
+    let greenCheckAt = 0;
     let layingUp = false;
     let layupElapsed = 0;
     let layupReleased = false;
@@ -1138,7 +1173,7 @@ export default function Basketball3D() {
       layupReleased = true;
       // The double-clutch releases beside the rim. Give it enough hang time to
       // clear the underside of the physical rim before dropping through it.
-      ball.owner = null; ball.mode = 'shot'; ball.lastOwner = 0; ball.shotAge = 0; ball.shotFlight = layupAcrobatic ? ACROBATIC_LAYUP_FLIGHT : 0.56; ball.shotPoints = 2; ball.scored = false;
+      ball.banked = false; ball.owner = null; ball.mode = 'shot'; ball.lastOwner = 0; ball.shotAge = 0; ball.shotFlight = layupAcrobatic ? ACROBATIC_LAYUP_FLIGHT : 0.56; ball.shotPoints = 2; ball.scored = false;
       ball.shotMake = Math.random() < chance;
       const releaseHand: DribbleHand = layupAcrobatic && layupDodgeSide < 0 ? 'left' : 'right';
       const from = getHandPosition(me, releaseHand);
@@ -1175,15 +1210,26 @@ export default function Basketball3D() {
       return true;
     };
 
+    const plannedShotOrigin = () => shotPending ? pendingShotOrigin.clone()
+      : projectedShotOrigin(athletes[0].position, cameraYaw, shotStyle, shotDirection(shotStyle));
+    const cancelUserShot = () => {
+      if (!charging && !shotPending) return false;
+      charging = false; shotPending = false; shotCharge = 0; shotReleaseDelay = 0;
+      athletes[0].action = 0; shotStyle = 'normal'; setCharge(0);
+      showMessage(athletes[0].jump > 0.05 ? '取消出手 · 持球落地' : '取消蓄力', 650);
+      return true;
+    };
+
     const queueUserShot = () => {
       if (!charging) return;
       if (ball.owner !== 0) { charging = false; shotCharge = 0; shotStyle = 'normal'; setCharge(0); return; }
       const me = athletes[0];
       pendingShotPower = shotCharge;
+      pendingShotOrigin.copy(plannedShotOrigin());
       charging = false; shotPending = true; shotCharge = 0; shotAirElapsed = 0;
       // At 1.25x playback, 0.32-0.35 s lands on source frames 81-82 and
       // coincides with the apex of the gameplay jump.
-      shotReleaseDelay = shotStyle === 'fade' ? 0.35 : shotStyle === 'normal' ? 0.32 : 0.33;
+      shotReleaseDelay = shotTiming(shotStyle).delay;
       shotAirStart.copy(me.position);
       const airDistance = shotStyle === 'fade' ? 1.28 : shotStyle === 'normal' ? 0 : 0.92;
       shotAirEnd.copy(shotAirStart).addScaledVector(shotDirection(shotStyle), airDistance);
@@ -1199,7 +1245,7 @@ export default function Basketball3D() {
     const releaseShot = (owner: number, power: number, styleOverride: ShotStyle = 'normal', remoteAim?: { yaw: number; pitch: number; origin: THREE.Vector3 }) => {
       if (ball.owner !== owner) return;
       if (owner === 0 && onlineSessionRef.current?.role === 'guest') {
-        sendPeer({ type: 'command', command: { kind: 'shot', power, yaw: cameraYaw, pitch: cameraPitch, origin: getGatherPosition(athletes[0]).toArray() as [number, number, number] } satisfies PeerCommand });
+        sendPeer({ type: 'command', command: { kind: 'shot', power, yaw: cameraYaw, pitch: cameraPitch, origin: plannedShotOrigin().toArray() as [number, number, number] } satisfies PeerCommand });
       }
       const player = athletes[owner];
       layupShotActive = false;
@@ -1209,19 +1255,20 @@ export default function Basketball3D() {
       if (owner !== 0 && !remoteAim && player.jump < 0.04) player.jumpV = Math.max(player.jumpV, 5.15);
       player.action = owner === 0 ? Math.max(player.action, 0.44) : 1.15;
       player.actionKind = 'shoot';
-      ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = 1.02 + Math.abs(player.position.x) * 0.014; ball.scored = false;
+      ball.banked = false; ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = 1.02 + Math.abs(player.position.x) * 0.014; ball.scored = false;
       const target = hoop(player.team);
       if (owner !== 0 && !remoteAim) facePoint(player, target);
       const distance = player.position.distanceTo(new THREE.Vector3(target.x, 0, target.z));
       ball.shotPoints = distance > 7 ? 3 : 2;
       if (owner === 0 || remoteAim) {
-        const from = remoteAim?.origin ?? getGatherPosition(player);
+        const from = remoteAim?.origin ?? plannedShotOrigin();
         ball.position.copy(from);
         ball.velocity.copy(aimedShotVelocity(remoteAim?.yaw ?? cameraYaw, remoteAim?.pitch ?? cameraPitch, power));
         ball.shotFlight = flightTimeToFloor(from.y, ball.velocity.y, BALL_RADIUS);
         ball.shotMake = false; // Only a real downward crossing of the rim can award points.
         assistedShotUntil[owner] = 0; assistedShotBonus[owner] = 0;
-        showMessage(`自由瞄准出手 · 力度 ${Math.round(power * 100)}%`, 720);
+        const green = owner === 0 && currentGreenWindow && power >= currentGreenWindow.low && power <= currentGreenWindow.high;
+        showMessage(green ? 'GREEN! · 精准出手' : `自由瞄准出手 · 力度 ${Math.round(power * 100)}%`, 720);
       } else {
         const ideal = clamp(0.54 + distance * 0.012, 0.58, 0.82);
         const coneRead = readShotCone(owner);
@@ -1535,6 +1582,7 @@ export default function Basketball3D() {
         if (ball.owner === 0) beginShot();
         else jump();
       }
+      if (event.button === 2 && cancelUserShot()) return;
       if (event.button === 2 && ball.owner === 0) {
         dribbling = true;
         dribbleMove = resolveDribbleMove(dashTime > 0);
@@ -1859,7 +1907,7 @@ export default function Basketball3D() {
       player.action = 1.08;
       player.actionKind = acrobatic ? 'acrobatic-layup' : 'layup';
       facePoint(player, rim);
-      ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = acrobatic ? ACROBATIC_LAYUP_FLIGHT : 0.7; ball.shotPoints = 2; ball.scored = false;
+      ball.banked = false; ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = acrobatic ? ACROBATIC_LAYUP_FLIGHT : 0.7; ball.shotPoints = 2; ball.scored = false;
       const coneRead = readShotCone(owner, 2.75, Math.PI * 0.24);
       const openBonus = coneRead.defendersInCone === 0 ? 0.09 + (acrobatic ? 0.06 : 0) : 0;
       const contactPenalty = contactPressure[owner] * (acrobatic ? 0.14 : 0.2);
@@ -1889,7 +1937,7 @@ export default function Basketball3D() {
       facePoint(player, rim);
       layupShotActive = false;
       layupArc = null;
-      ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = alleyOop ? 0.42 : putback ? 0.4 : 0.5; ball.shotPoints = 2; ball.scored = false;
+      ball.banked = false; ball.owner = null; ball.mode = 'shot'; ball.lastOwner = owner; ball.shotAge = 0; ball.shotFlight = alleyOop ? 0.42 : putback ? 0.4 : 0.5; ball.shotPoints = 2; ball.scored = false;
       const contactPenalty = contactPressure[owner] * 0.18;
       const chance = clamp((alleyOop ? 0.84 : putback ? 0.68 : 0.91) + (coneRead.defendersInCone === 0 ? 0.05 : 0) - coneRead.contestStrength * (putback ? 0.5 : 0.62) - contactPenalty, 0.01, 0.98);
       ball.shotMake = Math.random() < chance;
@@ -2036,58 +2084,15 @@ export default function Basketball3D() {
     };
 
     const resolveBallBackboardCollisions = (previous: THREE.Vector3) => {
-      for (const sign of [-1, 1]) {
-        const planeX = sign * BACKBOARD_X;
-        const travelX = ball.position.x - previous.x;
-        if (Math.abs(travelX) > 0.0001) {
-          const amount = (planeX - previous.x) / travelX;
-          if (amount >= 0 && amount <= 1) {
-            const impactY = previous.y + (ball.position.y - previous.y) * amount;
-            const impactZ = previous.z + (ball.position.z - previous.z) * amount;
-            if (impactY >= BACKBOARD_MIN_Y - BALL_RADIUS && impactY <= BACKBOARD_MAX_Y + BALL_RADIUS && Math.abs(impactZ) <= BACKBOARD_HALF_Z + BALL_RADIUS) {
-              const normal = new THREE.Vector3(travelX > 0 ? -1 : 1, 0, 0);
-              ball.position.set(planeX, impactY, impactZ).addScaledVector(normal, BALL_RADIUS + 0.061);
-              reflectBall(normal, 0.72);
-              makeBallLooseFromCollision();
-              return true;
-            }
-          }
-        }
-        const insideBoard = Math.abs(ball.position.x - planeX) < BALL_RADIUS + 0.061
-          && ball.position.y >= BACKBOARD_MIN_Y - BALL_RADIUS && ball.position.y <= BACKBOARD_MAX_Y + BALL_RADIUS
-          && Math.abs(ball.position.z) <= BACKBOARD_HALF_Z + BALL_RADIUS;
-        if (insideBoard) {
-          const normal = new THREE.Vector3(Math.sign(ball.position.x - planeX) || -Math.sign(travelX) || -sign, 0, 0);
-          ball.position.x = planeX + normal.x * (BALL_RADIUS + 0.061);
-          reflectBall(normal, 0.72);
-          makeBallLooseFromCollision();
-          return true;
-        }
-      }
-      return false;
+      if (!backboardContact(ball.position, ball.velocity, ballSpin, previous, BALL_RADIUS)) return false;
+      ball.banked = true;
+      makeBallLooseFromCollision();
+      return true;
     };
-
     const resolveBallRimCollisions = (previous: THREE.Vector3) => {
-      for (const rimX of [-HOOP_X, HOOP_X]) {
-        for (let sample = 1; sample <= 5; sample += 1) {
-          const candidate = previous.clone().lerp(ball.position, sample / 5);
-          const radial = new THREE.Vector3(candidate.x - rimX, 0, candidate.z);
-          const radialDistance = radial.length();
-          if (radialDistance < 0.001) radial.set(0, 0, 1);
-          else radial.multiplyScalar(1 / radialDistance);
-          const nearestRingPoint = new THREE.Vector3(rimX, HOOP_HEIGHT, 0).addScaledVector(radial, RIM_RADIUS);
-          const separation = candidate.sub(nearestRingPoint);
-          const distance = separation.length();
-          const minimum = BALL_RADIUS + RIM_TUBE_RADIUS;
-          if (distance >= minimum) continue;
-          const normal = distance > 0.001 ? separation.multiplyScalar(1 / distance) : new THREE.Vector3(0, 1, 0);
-          ball.position.copy(nearestRingPoint).addScaledVector(normal, minimum);
-          reflectBall(normal, 0.68);
-          makeBallLooseFromCollision();
-          return true;
-        }
-      }
-      return false;
+      if (!rimContact(ball.position, ball.velocity, ballSpin, previous, BALL_RADIUS)) return false;
+      makeBallLooseFromCollision();
+      return true;
     };
 
     const resolveBallPlayerCollisions = () => {
@@ -2137,6 +2142,7 @@ export default function Basketball3D() {
       if (!withinCylinder || !onCourtSideOfBoard) return false;
       ball.position.set(crossX, HOOP_HEIGHT - BALL_RADIUS * 0.7, crossZ);
       scoreBasket(shooter.team, ball.shotPoints, now);
+      if (ball.banked) showMessage('打板命中！', 950);
       return true;
     };
 
@@ -2211,6 +2217,7 @@ export default function Basketball3D() {
           ball.group.rotation.x += dt * 6;
         } else if ((charging || shotPending || dunkCharging) && ball.owner === 0) {
           const gather = getGatherPosition(player);
+          if (shotPending) gather.lerp(pendingShotOrigin, clamp(shotAirElapsed / shotTiming(shotStyle).delay, 0, 1));
           ball.position.lerp(gather, 1 - Math.exp(-dt * 91));
         } else if ((possessionDribble || dribbling || dribbleGrace > 0) && ball.owner === 0) {
           const transferTarget = (move: DribbleMove, from: DribbleHand): DribbleHand => {
@@ -2461,6 +2468,8 @@ export default function Basketball3D() {
         if (dribbling) dribbleMove = resolveDribbleMove(false);
         else if (dribbleGrace <= 0) dribbleMove = resolveCarryMove();
       }
+      if (charging) shotGatherElapsed += dt;
+      else if (shotPending || me.actionKind === 'shoot' && me.action > 0) shotAirElapsed += dt;
       const specialShotActive = shotStyle !== 'normal' && (charging || shotPending || (me.actionKind === 'shoot' && me.action > 0));
       if (layingUp) {
         const approachDuration = layupAcrobatic ? LAYUP_APPROACH_DURATION + 0.08 : LAYUP_APPROACH_DURATION;
@@ -2478,12 +2487,10 @@ export default function Basketball3D() {
       } else if (specialShotActive && !dunking) {
         let target: THREE.Vector3;
         if (charging) {
-          shotGatherElapsed += dt;
           const progress = clamp(shotGatherElapsed / 0.24, 0, 1);
           const eased = progress * progress * (3 - 2 * progress);
           target = shotStepStart.clone().lerp(shotStepEnd, eased);
         } else {
-          shotAirElapsed += dt;
           const progress = clamp(shotAirElapsed / (shotStyle === 'fade' ? 0.62 : 0.54), 0, 1);
           const eased = 1 - Math.pow(1 - progress, 3);
           target = shotAirStart.clone().lerp(shotAirEnd, eased);
@@ -2800,7 +2807,7 @@ export default function Basketball3D() {
         const planarSpeed = new THREE.Vector2(player.velocity.x, player.velocity.z).length();
         stationaryTime[index] = planarSpeed < 0.45 && player.jump < 0.08 ? Math.min(2, stationaryTime[index] + dt) : 0;
         if (!(onlineSession && index === 3)) {
-          player.jumpV -= 15.5 * dt; player.jump += player.jumpV * dt;
+          player.jumpV -= PLAYER_GRAVITY * dt; player.jump += player.jumpV * dt;
           if (player.jump < 0) {
             if (player.jumpV < -2) player.landing = Math.min(0.12, -player.jumpV * 0.012);
             player.jump = 0; player.jumpV = 0;
@@ -3114,35 +3121,30 @@ export default function Basketball3D() {
       aimArc.visible = landingMarker.visible = visible;
       if (!visible) return;
       const power = charging ? shotCharge : shotPending ? pendingShotPower : 0.55;
-      const origin = getGatherPosition(athletes[0]);
-      const velocity = aimedShotVelocity(cameraYaw, cameraPitch, power);
-      const duration = flightTimeToFloor(origin.y, velocity.y, BALL_RADIUS);
-      let count = arcSamples;
-      let floorLanding = true;
+      const origin = plannedShotOrigin();
+      const now = performance.now();
+      if (now >= greenCheckAt) {
+        greenCheckAt = now + 160;
+        currentGreenWindow = findGreenWindow(origin, cameraYaw, cameraPitch);
+        setGreenWindow(currentGreenWindow);
+      }
+      const forecast = forecastShot(origin, cameraYaw, cameraPitch, power);
+      const count = Math.min(arcSamples, forecast.points.length);
       let lineDistance = 0;
-      for (let i = 0; i < arcSamples; i++) {
-        flightPoint(origin, velocity, duration * i / (arcSamples - 1), previewPoint);
-        const boardContact = Math.abs(Math.abs(previewPoint.x) - BACKBOARD_X) < BALL_RADIUS + 0.07
-          && Math.abs(previewPoint.z) < BACKBOARD_HALF_Z + BALL_RADIUS
-          && previewPoint.y > BACKBOARD_MIN_Y - BALL_RADIUS && previewPoint.y < BACKBOARD_MAX_Y + BALL_RADIUS;
-        const rimContact = Math.abs(previewPoint.y - HOOP_HEIGHT) < BALL_RADIUS + RIM_TUBE_RADIUS
-          && Math.abs(Math.hypot(Math.abs(previewPoint.x) - HOOP_X, previewPoint.z) - RIM_RADIUS) < BALL_RADIUS + RIM_TUBE_RADIUS;
-        const boundary = Math.abs(previewPoint.x) >= COURT_HALF_X - BALL_RADIUS || Math.abs(previewPoint.z) >= COURT_HALF_Z - BALL_RADIUS;
-        previewPoint.y = Math.max(BALL_RADIUS, previewPoint.y);
+      for (let i = 0; i < count; i++) {
+        previewPoint.copy(forecast.points[i]);
         if (i > 0) lineDistance += previewPoint.distanceTo(previousPreviewPoint);
-        arcDistances.setX(i, lineDistance);
-        previousPreviewPoint.copy(previewPoint);
+        arcDistances.setX(i, lineDistance); previousPreviewPoint.copy(previewPoint);
         arcPositions.setXYZ(i, previewPoint.x, previewPoint.y, previewPoint.z);
-        if (i > 0 && (boardContact || rimContact || boundary)) { count = i + 1; floorLanding = false; break; }
       }
       arcGeometry.setDrawRange(0, count);
       arcPositions.needsUpdate = true;
       arcDistances.needsUpdate = true;
-      arcMaterial.color.set(charging || shotPending ? '#ffce82' : '#9fe9ed');
+      arcMaterial.color.set(forecast.made ? '#79ff8b' : forecast.banked ? '#bdb0ff' : charging || shotPending ? '#ffce82' : '#9fe9ed');
       arcMaterial.opacity = charging || shotPending ? 0.95 : 0.45;
       landingMarker.material.color.copy(arcMaterial.color);
       landingMarker.position.copy(previewPoint);
-      if (floorLanding) { landingMarker.position.y = 0.07; landingMarker.rotation.set(-Math.PI / 2, 0, 0); }
+      if (previewPoint.y <= BALL_RADIUS + 0.05) { landingMarker.position.y = 0.07; landingMarker.rotation.set(-Math.PI / 2, 0, 0); }
       else landingMarker.lookAt(camera.position);
     };
 
@@ -3242,6 +3244,7 @@ export default function Basketball3D() {
 
     runtimeRef.current = {
       reset: resetGame,
+      setCourt,
       setJersey: (color) => {
         athletes.slice(0, 3).forEach((player) => {
           const teamMaterials = player.group.userData.teamMaterials as Array<THREE.MeshStandardMaterial | THREE.MeshPhongMaterial> | undefined;
@@ -3253,6 +3256,12 @@ export default function Basketball3D() {
         });
       },
     };
+    try {
+      const saved = localStorage.getItem('hoops-court');
+      if (COURT_THEMES.some(theme => theme.id === saved)) courtRef.current = saved as CourtTheme;
+    } catch { /* Device preferences are optional. */ }
+    setCourt(courtRef.current);
+    const preferenceFrame = requestAnimationFrame(() => setCourtTheme(courtRef.current));
     if (pendingModeRef.current) {
       resetGame(pendingModeRef.current);
       pendingModeRef.current = null;
@@ -3343,6 +3352,8 @@ export default function Basketball3D() {
         }
         positions.needsUpdate = true;
       });
+      courtWorlds.update(wallNow, Math.max(...nets.map(net => net.energy)));
+      if (courtRef.current === 'forest') animalLooks.forEach(look => look.update(wallNow));
       updateCamera(frameDt);
       updateAimGuide();
       renderer.render(scene, camera);
@@ -3354,6 +3365,7 @@ export default function Basketball3D() {
       rigCancelled = true;
       if (blockFeedbackTimer) window.clearTimeout(blockFeedbackTimer);
       cancelAnimationFrame(frame);
+      cancelAnimationFrame(preferenceFrame);
       runtimeRef.current = null;
       document.removeEventListener('keydown', onKeyDown); document.removeEventListener('keyup', onKeyUp);
       document.removeEventListener('mousemove', onMouseMove); document.removeEventListener('mouseup', onMouseUp);
@@ -3377,6 +3389,10 @@ export default function Basketball3D() {
     };
   }, [changePhase]);
 
+  const chooseCourt = (theme: CourtTheme) => {
+    setCourtTheme(theme); courtRef.current = theme; runtimeRef.current?.setCourt(theme);
+    try { localStorage.setItem('hoops-court', theme); } catch { /* Optional preference. */ }
+  };
   const chooseJersey = (color: string) => {
     jerseyRef.current = color; setJersey(color); runtimeRef.current?.setJersey(color);
   };
@@ -3393,24 +3409,32 @@ export default function Basketball3D() {
       {message && <div className="event3d">{message}</div>}
       {blockImpact && <div className="blockImpact3d" aria-live="assertive"><strong>BLOCK!</strong><span>封盖成功</span></div>}
       {phase === 'playing' && <>
-        <div className={`aimReticle3d ${aimActive ? 'ready' : ''} ${charge > 0 ? 'charging' : ''}`} aria-label="准星">
+        <div className={`aimReticle3d ${aimActive ? 'ready' : ''} ${charge > 0 ? 'charging' : ''} ${greenWindow && charge >= greenWindow.low && charge <= greenWindow.high ? 'greenRelease' : ''}`} aria-label="准星">
           <svg viewBox="0 0 64 64" aria-hidden="true"><circle className="aimTrack3d" cx="32" cy="32" r="23"/><circle className="aimPower3d" cx="32" cy="32" r="23" pathLength="100" strokeDasharray={`${charge * 100} 100`}/><path d="M32 3v6M32 55v6M3 32h6M55 32h6"/><circle className="aimDot3d" cx="32" cy="32" r="2"/></svg>
           {aimActive && <span>{charge > 0 ? `力度 ${Math.round(charge * 100)}%` : '按住左键蓄力'}</span>}
         </div>
-        {aimActive && <div className="aimHint3d">抬高准星控制弧度 · 松开左键投出<span>虚线预估首次碰撞前轨迹</span></div>}
+        {aimActive && <div className="aimHint3d">起跳后的出手轨迹 · 右键取消蓄力 / 出手<span>紫色：打板反弹 · 绿色：命中路线</span></div>}
         <div className="room3d"><span>Room code: <b>{onlineMatch?.room.code ?? (gameMode === '1v1' ? '1101' : gameMode === 'practice' ? 'FREE' : '1844')}</b></span><span>Region: asia</span><span>Type: {onlineMatch ? '1V1 online' : gameMode === '1v1' ? '1V1 local' : gameMode === 'practice' ? 'SOLO practice' : '3V3 local'}</span><em>{onlineMatch ? '● P2P' : '⌁ Local'}</em></div>
         <div className="chat3d"><button className="exit3d" onClick={()=>changePhase('paused')}>Exit <kbd>P</kbd></button><div><button onClick={()=>setMessage('PASS!')}>PASS <kbd>1</kbd></button><button onClick={()=>setMessage('NICE!')}>NICE <kbd>2</kbd></button><button onClick={()=>setMessage('SORRY!')}>SORRY <kbd>3</kbd></button><span>CHAT</span></div></div>
         <div className="guide3d"><span>Jump / Block <kbd>LMB</kbd></span><span>Steal <kbd>Shift</kbd></span>{gameMode === '3v3' && <span>Pass / Call <kbd>F</kbd></span>}<span>Dash <kbd>Space</kbd></span><span>Dribble + Move <kbd>RMB</kbd></span><span>Burst Combo <kbd>RMB + Space</kbd></span><span>Running Layup <kbd>Run + LMB</kbd></span><span>Acrobatic Layup <kbd>Layup + Turn</kbd></span><span>Side-step Shot <kbd>A/D + Space + LMB</kbd></span><span>Fadeaway <kbd>S + Space + LMB</kbd></span><span>Aim / Charge <kbd>Hold LMB</kbd></span><span>Dunk / Putback <kbd>Tab</kbd></span></div>
+        {aimActive && <div className="shotMeter3d">
+          <div className="shotMeterLabels"><span>出手力度</span><strong>{greenWindow ? `${greenWindow.banked ? '打板' : '空心'}绿区 ${Math.round(greenWindow.low * 100)}–${Math.round(greenWindow.high * 100)}%` : '调整准星寻找绿区'}</strong></div>
+          <div className="shotMeterTrack"><i style={{width:`${charge * 100}%`}}/>{greenWindow && <b style={{left:`${greenWindow.low * 100}%`,width:`${Math.max(1, (greenWindow.high-greenWindow.low)*100)}%`}}/>}<em style={{left:`${charge * 100}%`}}/></div>
+        </div>}
         <div className="status3d"><progress className="staminaMeter3d" title="体力：抢断、跳跃和冲刺共用" aria-label="共享体力" max={1} value={stamina}/>{charge > 0 && <i className="charge3d"><b style={{height:`${charge * 100}%`}}/></i>}{dunkCharge > 0 && <i className="dunk3d"><b style={{height:`${dunkCharge * 100}%`}}/></i>}</div>
       </>}
 
       {phase === 'menu' && <section className="menu3d">
         <div className="logo3d"><span>UNMATCHED</span><strong>BASKETBALL</strong></div>
-        <nav><button onClick={()=>changePhase('rooms')}>JOIN ROOM <em>⌂</em></button><button>CUSTOMIZE <em>●</em></button><button>ABILITIES <em>◉</em></button></nav>
+        <nav><button onClick={()=>changePhase('rooms')}>JOIN ROOM <em>⌂</em></button></nav>
         <div className="jerseys3d"><span>球衣</span>{COLORS.map(color=><button key={color} onClick={()=>chooseJersey(color)} className={jersey===color?'active':''} style={{background:color}} aria-label={`选择 ${color} 球衣`}/>)}</div>
+        <fieldset className="courtPicker3d" aria-label="选择球场">
+          <div className="courtPickerTitle">选择球场 <span>4 个世界 · 同一场热爱</span></div>
+          <div className="courtOptions3d">{COURT_THEMES.map(theme => <button key={theme.id} className={`courtOption3d theme-${theme.id} ${courtTheme === theme.id ? 'selected' : ''}`} aria-pressed={courtTheme === theme.id} onClick={() => chooseCourt(theme.id)}><i>{theme.icon}</i><strong>{theme.name}</strong><small>{theme.caption}</small></button>)}</div>
+        </fieldset>
         <button className="quick3d" onClick={()=>startGame('3v3')}><span>QUICK PLAY</span><b>▶</b></button>
         <button className="practice3d" onClick={startPractice}><span>PRACTICE</span><small>无对手 · 无限时投篮</small><b>◎</b></button>
-        <p>第一人称 3V3 · 90 秒快速比赛</p>
+        <p>{COURT_THEMES.find(theme => theme.id === courtTheme)?.name} · 第一人称 3V3</p>
       </section>}
 
       {(phase === 'rooms' || onlineMatch) && <section className={`roomsPanel3d ${phase === 'rooms' ? '' : 'onlineLobbyKeeper3d'}`}><OnlineLobby onBack={()=>changePhase('menu')} onPractice={startPractice} onMatchStart={startOnlineMatch}/></section>}

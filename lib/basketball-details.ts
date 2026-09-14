@@ -11,7 +11,7 @@ function labelTexture(draw: (context: CanvasRenderingContext2D) => void, width =
 }
 
 /** Small shared meshes and painted surfaces keep the court detailed without remote assets. */
-export function addCourtDetails(scene: THREE.Scene, fabric: THREE.Texture) {
+export function addCourtDetails(scene: THREE.Scene | THREE.Group, fabric: THREE.Texture) {
   const steel = new THREE.MeshStandardMaterial({ color: '#263e4c', metalness: 0.72, roughness: 0.38 });
   const wood = new THREE.MeshStandardMaterial({ color: '#855334', roughness: 0.8 });
   const concrete = new THREE.MeshStandardMaterial({ color: '#bac1b6', roughness: 0.96 });

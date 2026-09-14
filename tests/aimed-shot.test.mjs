@@ -9,18 +9,20 @@ const source = readFileSync(new URL('../app/basketball-3d.tsx', import.meta.url)
 const ast = ts.createSourceFile('game.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const callbacks = [];
 function visit(node) {
-  if (ts.isVariableDeclaration(node) && ['releaseShot', 'processPeerCommands'].includes(node.name.getText(ast))) callbacks.push(`const ${node.getText(ast)};`);
+  if (ts.isVariableDeclaration(node) && ['releaseShot', 'processPeerCommands', 'plannedShotOrigin', 'shotDirection', 'queueUserShot', 'cancelUserShot'].includes(node.name.getText(ast))) callbacks.push(`const ${node.getText(ast)};`);
   ts.forEachChild(node, visit);
 }
 visit(ast);
-const code = ts.transpileModule(`${physics}\n${callbacks.join('\n')}\nglobalThis.api = { releaseShot, processPeerCommands, aimedShotVelocity, flightPoint, flightTimeToFloor, advanceFlight };`, {compilerOptions: {target: ts.ScriptTarget.ES2022}}).outputText;
+const code = ts.transpileModule(`${physics}\n${callbacks.join('\n')}\nglobalThis.api = { releaseShot, processPeerCommands, plannedShotOrigin, queueUserShot, cancelUserShot, aimedShotVelocity, flightPoint, flightTimeToFloor, advanceFlight, projectedShotOrigin, forecastShot, findGreenWindow };`, {compilerOptions: {target: ts.ScriptTarget.ES2022}}).outputText;
 function harness() {
   const athletes = Array.from({length: 6}, (_, i) => ({team: i < 3 ? 0 : 1, position: new THREE.Vector3(0, 0, 0), jumpV: 1.4, jump: 0.7, action: 0.5}));
   const h = {THREE, Math, Number, Array, athletes, BALL_RADIUS: 0.125,
     ball: {owner: 0, position: new THREE.Vector3(), velocity: new THREE.Vector3()}, ballSpin: new THREE.Vector3(),
     onlineSessionRef: {current: null}, cameraYaw: Math.PI / 2, cameraPitch: 0.7, shotStyle: 'normal', layupShotActive: false, layupArc: null,
     charging: false, shotPending: true, shotReleaseDelay: 0, shotCharge: 0.65, dunkCharging: false, dunkPower: 0, dunking: false, dunkElapsed: 0, dunkHasBall: false, dunkResolved: false, dribbling: false, dribbleGrace: 0, dribbleMove: 'forward', dashTime: 0,
-    assistedShotUntil: [], assistedShotBonus: [], peerCommands: [], sent: [],
+    assistedShotUntil: [], assistedShotBonus: [], peerCommands: [], sent: [], currentGreenWindow: null,
+    pendingShotOrigin: new THREE.Vector3(0.4, 2.9, 0.1), pendingShotPower: 0, shotAirElapsed: 0,
+    shotAirStart: new THREE.Vector3(), shotAirEnd: new THREE.Vector3(),
     clamp: THREE.MathUtils.clamp, hoop: () => new THREE.Vector3(18.7, 3.05, 0),
     getGatherPosition: () => new THREE.Vector3(0.4, 2.7, 0.1),
     showMessage: () => {}, setCharge: () => {}, setDunkCharge: () => {},
@@ -78,4 +80,35 @@ test('invalid peer shot data cannot produce NaN physics or a distant release poi
     h.peerCommands.push({kind:'shot', power:0.5, yaw:0, pitch:0.7, origin:[0,2,0], ...patch});
     h.api.processPeerCommands(0); assert.equal(h.ball.owner, 3);
   }
+});
+
+test('the preview origin already includes the jump and stays fixed until release', () => {
+  const h = harness(); h.shotPending = false; h.charging = true;
+  const before = h.api.plannedShotOrigin();
+  assert.ok(before.y > 2.8 && before.y < 3.1);
+  h.api.queueUserShot();
+  for (const jump of [0, 0.4, 0.85]) {
+    h.athletes[0].jump = jump;
+    assert.ok(h.api.plannedShotOrigin().distanceTo(before) < 1e-10);
+  }
+  h.api.releaseShot(0, 0.6);
+  assert.ok(h.ball.position.distanceTo(before) < 1e-10);
+});
+test('cancel preserves possession and natural descent without releasing a ball', () => {
+  const h = harness(); h.athletes[0].jump = 0.5; h.athletes[0].jumpV = -1.2;
+  assert.equal(h.api.cancelUserShot(), true);
+  assert.equal(h.ball.owner, 0); assert.equal(h.shotPending, false);
+  assert.equal(h.athletes[0].jumpV, -1.2); assert.equal(h.athletes[0].jump, 0.5);
+});
+
+
+test('green window supports bank shots and never rescues a shot facing away', () => {
+  const h = harness(), origin = new THREE.Vector3(14, 2.9, 2);
+  const green = h.api.findGreenWindow(origin, 1.1, 0.8);
+  assert.ok(green && green.high > green.low);
+  assert.ok(green.low <= 0.2 && green.high >= 0.2);
+  for (const power of [green.low, (green.low + green.high) / 2, green.high]) {
+    assert.equal(h.api.forecastShot(origin, 1.1, 0.8, power).made, true);
+  }
+  assert.equal(h.api.findGreenWindow(origin, -Math.PI / 2, 0.8), null);
 });
