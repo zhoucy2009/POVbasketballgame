@@ -3321,7 +3321,7 @@ export default function Basketball3D() {
             updatePlayers(dt, now);
             processPeerCommands(now);
             if (layingUp && !layupReleased && layupElapsed >= (layupAcrobatic ? 0.8 : 0.72)) releaseUserLayup();
-            if (charging) shotCharge = Math.min(1, shotCharge + dt * 0.85);
+            if (charging) shotCharge = Math.min(1, shotCharge + dt * (shotStyle === 'normal' ? 2 : 2.4));
             if (shotPending) {
               shotReleaseDelay -= dt;
               if (ball.owner !== 0) { shotPending = false; shotStyle = 'normal'; }
@@ -3347,12 +3347,14 @@ export default function Basketball3D() {
             }
           }
           uiAt += dt;
-          if (uiAt > 0.08) { uiAt = 0; setClock(gameTime); setCharge(charging ? shotCharge : shotPending ? pendingShotPower : 0); setAimActive(ball.owner === 0 && !layingUp && !dunkCharging && !dunking); setDunkCharge(dunkCharging ? dunkPower : 0); setStamina(athletes[0].stamina); }
+          if (uiAt > 0.08) { uiAt = 0; setClock(gameTime); setAimActive(ball.owner === 0 && !layingUp && !dunkCharging && !dunking); setDunkCharge(dunkCharging ? dunkPower : 0); setStamina(athletes[0].stamina); }
         } else {
           athletes.forEach((player, index) => { player.group.position.y = Math.sin(now * 2 + index) * 0.012; });
           updateBall(0, now);
         }
       }
+      // Keep the faster timing bar in sync with every rendered frame.
+      if (phaseRef.current === 'playing') setCharge(charging ? shotCharge : shotPending ? pendingShotPower : 0);
       const alpha = accumulator / FIXED_STEP;
       athletes.forEach(player => {
         player.group.position.lerpVectors(player.previousPosition, new THREE.Vector3(player.position.x, player.jump, player.position.z), alpha);
