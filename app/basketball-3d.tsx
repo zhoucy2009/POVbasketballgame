@@ -841,11 +841,11 @@ export default function Basketball3D() {
     let dunkElapsed = 0;
     let dunkHasBall = false;
     let dunkWasPerfect = false;
+    let dunkIsPutback = false;
     let dunkResolved = false;
     const dunkStartPosition = new THREE.Vector3();
     const dunkFinishPosition = new THREE.Vector3();
     let dribbling = false;
-    let dunkIsPutback = false;
     let dribbleGrace = 0;
     let dribbleMove: DribbleMove = 'forward';
     let dribbleSequenceMove: DribbleMove = 'forward';
@@ -871,6 +871,7 @@ export default function Basketball3D() {
     const separationMoveUntil = Array.from({ length: athletes.length }, () => 0);
     const contactPressure = Array.from({ length: athletes.length }, () => 0);
     const blockAttemptUntil = Array.from({ length: athletes.length }, () => 0);
+    const blockContactResolved = Array.from({ length: athletes.length }, () => 0);
     const offBallCallUntil = Array.from({ length: athletes.length }, () => 0);
     const offBallCallCooldown = Array.from({ length: athletes.length }, () => 0);
     const offBallOpportunity = Array.from({ length: athletes.length }, (): OpportunityKind => 'none');
@@ -887,7 +888,6 @@ export default function Basketball3D() {
     const teamTactics: [TeamTactic | null, TeamTactic | null] = [null, null];
     let stealProtectionUntil = 0;
     let uiAt = 0;
-    const blockContactResolved = Array.from({ length: athletes.length }, () => 0);
     let last = performance.now() / 1000;
     let dragLooking = false;
     let blockCameraKick = 0;
@@ -1371,6 +1371,7 @@ export default function Basketball3D() {
       me.action = 1.55; me.actionKind = 'dunk';
       dunking = true; dunkElapsed = 0; dunkWasPerfect = dunkPower > 0.58 && dunkPower < 0.86; dunkResolved = false;
       dunkHasBall = ball.owner === 0;
+      dunkIsPutback = !dunkHasBall;
       dunkStartPosition.copy(me.position);
       dunkFinishPosition.set(target.x - rimDirection * 0.62, 0, target.z);
       if (dunkHasBall) {
@@ -1490,7 +1491,6 @@ export default function Basketball3D() {
       const currentTime = performance.now() / 1000;
       if (layingUp || dunking || charging || shotPending || dunkCharging) return;
       if (!spendStamina(me, STEAL_STAMINA_COST)) return;
-      dunkIsPutback = !dunkHasBall;
       me.action = 0.62; me.actionKind = 'steal';
       if (onlineSessionRef.current?.role === 'guest') {
         sendPeer({ type: 'command', command: { kind: 'steal' } satisfies PeerCommand });
@@ -1954,6 +1954,7 @@ export default function Basketball3D() {
     const startAiDunk = (owner: number, putback = false, alleyOop = false) => {
       const player = athletes[owner];
       if (owner === 0 || (putback ? ball.owner !== null : ball.owner !== owner)) return false;
+      if (putback && !canCatchPutback(owner, FIXED_STEP)) return false;
       const rim = hoop(player.team);
       const rimGround = rim.clone().setY(0);
       if (player.position.distanceTo(rimGround) > (alleyOop ? 3.6 : putback ? PUTBACK_PLAYER_RADIUS : 2.45)) return false;
@@ -2075,7 +2076,6 @@ export default function Basketball3D() {
           const impulse = closingSpeed * 0.52;
           a.velocity.x += nx * impulse; a.velocity.z += nz * impulse;
           b.velocity.x -= nx * impulse; b.velocity.z -= nz * impulse;
-      if (putback && !canCatchPutback(owner, FIXED_STEP)) return false;
           if (a.team !== b.team) {
             contactPressure[first] = Math.max(contactPressure[first], impact);
             contactPressure[second] = Math.max(contactPressure[second], impact);
@@ -2184,11 +2184,25 @@ export default function Basketball3D() {
     };
 
     const catchUserPutback = () => {
+      if (!canCatchPutback(0, FIXED_STEP)) return false;
+      dunkIsPutback = true;
       ball.owner = 0; ball.lastOwner = 0; ball.mode = 'held'; dunkHasBall = true;
       ball.velocity.set(0, 0, 0); ball.passTarget = null;
       layupShotActive = false; layupArc = null; lobPassActive = false; pendingPassReward = null;
       showMessage('空中接球补扣！', 650);
+      return true;
     };
+
+    const findHandBlocker = (shooterTeam: Team, previous: THREE.Vector3, position: THREE.Vector3, now: number) => athletes.findIndex((defender, index) => {
+      const attempt = blockAttemptUntil[index];
+      if (!isActiveIndex(index) || defender.team === shooterTeam || attempt <= now || defender.jump < 0.12
+        || blockContactResolved[index] === attempt) return false;
+      const touching = (['left', 'right'] as const).some(hand => ballTouchesHand(previous, position, getHandPosition(defender, hand), HAND_CONTACT_RADIUS));
+      if (!touching) return false;
+      // One roll per jump, even if the ball stays near a hand for several frames.
+      blockContactResolved[index] = attempt;
+      return Math.random() < BLOCK_SUCCESS_CHANCE;
+    });
 
     const updateBall = (dt: number, now: number) => {
       const possessionDribble = ball.owner === 0 && !layingUp && !charging && !shotPending && !dunkCharging && !dunking;
@@ -2305,26 +2319,12 @@ export default function Basketball3D() {
           player.dribblePhase = (player.dribblePhase + dt * (aiMove === 'between' ? 1.7 : aiMove.startsWith('spin') ? 2.2 : 2.55)) % 1;
           if (player.dribblePhase < previousPhase || aiMove === 'cross-left' || aiMove === 'cross-right') {
             if (aiMove === 'cross-left') player.dribbleHand = 'left';
-      if (!canCatchPutback(0, FIXED_STEP)) return false;
-      dunkIsPutback = true;
             else if (aiMove === 'cross-right') player.dribbleHand = 'right';
             else player.dribbleHand = oppositeHand(player.dribbleHand);
           }
           const palm = getHandPosition(player, player.dribbleHand);
-      return true;
           const side = player.dribbleHand === 'left' ? -1 : 1;
           const localZ = aiMove === 'between' || aiMove.startsWith('spin') ? -0.22 : aiMove === 'attack' || aiMove.startsWith('burst') ? 0.46 : 0.24;
-    const findHandBlocker = (shooterTeam: Team, previous: THREE.Vector3, position: THREE.Vector3, now: number) => athletes.findIndex((defender, index) => {
-      const attempt = blockAttemptUntil[index];
-      if (!isActiveIndex(index) || defender.team === shooterTeam || attempt <= now || defender.jump < 0.12
-        || blockContactResolved[index] === attempt) return false;
-      const touching = (['left', 'right'] as const).some(hand => ballTouchesHand(previous, position, getHandPosition(defender, hand), HAND_CONTACT_RADIUS));
-      if (!touching) return false;
-      // One roll per jump, even if the ball stays near a hand for several frames.
-      blockContactResolved[index] = attempt;
-      return Math.random() < BLOCK_SUCCESS_CHANCE;
-    });
-
           const ground = player.group.localToWorld(new THREE.Vector3(side * 0.34, 0, localZ));
           ground.y = BALL_RADIUS;
           const bounce = Math.pow(Math.abs(Math.cos(player.dribblePhase * Math.PI)), 0.72);
