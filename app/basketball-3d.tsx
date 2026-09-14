@@ -240,7 +240,7 @@ export default function Basketball3D() {
     const camera = new THREE.PerspectiveCamera(72, 1, 0.035, 120);
     scene.add(camera);
 
-    scene.add(new THREE.HemisphereLight('#dceeff', '#6b5545', 2.1));
+    const ambient = new THREE.HemisphereLight('#dceeff', '#6b5545', 2.1); scene.add(ambient);
     const sun = new THREE.DirectionalLight('#fff0d2', 3.3);
     sun.position.set(-10, 24, 7);
     sun.castShadow = true;
@@ -378,10 +378,6 @@ export default function Basketball3D() {
 
     const benchMat=new THREE.MeshStandardMaterial({color:'#5b3a24',roughness:.88});
     const bench=new THREE.Mesh(new THREE.BoxGeometry(7,.25,.7),benchMat);bench.position.set(-5,.55,-12.65);bench.castShadow=true;scene.add(bench);
-    [-7.4,-6.1,-4.8,-3.5,-2.2].forEach((x,i)=>{
-      const fan=new THREE.Group();const shirt=new THREE.Mesh(new THREE.CapsuleGeometry(.18,.45,2,6),new THREE.MeshStandardMaterial({color:['#53bfd3','#f26471','#8b72cf','#f3c75b'][i%4],flatShading:true}));shirt.position.y=1.05;fan.add(shirt);
-      const head=new THREE.Mesh(new THREE.SphereGeometry(.15,8,6),new THREE.MeshStandardMaterial({color:'#c98c65',flatShading:true}));head.position.y=1.55;fan.add(head);fan.position.set(x,0,-12.65);scene.add(fan);
-    });
     for (let x = -18; x <= 18; x += 6) {
       const building = new THREE.Mesh(
         new THREE.BoxGeometry(4.5, 10 + (Math.abs(x) % 5), 5),
@@ -510,12 +506,18 @@ export default function Basketball3D() {
     const setCourt = (theme: CourtTheme) => {
       courtRef.current = theme;
       courtWorlds.select(theme);
-      floorMaterial.color.set(theme === 'forest' ? '#ae9270' : theme === 'beach' ? '#bfcbb7' : theme === 'hall' ? '#dfb27a' : '#c58a52');
+      floorMaterial.color.set(theme === 'forest' ? '#ae9270' : theme === 'beach' ? '#bfa3b9' : theme === 'hall' ? '#dfb27a' : '#c58a52');
       floorMaterial.roughness = theme === 'hall' ? 0.36 : 0.64;
-      (apron.material as THREE.MeshStandardMaterial).color.set(theme === 'forest' ? '#647b59' : theme === 'beach' ? '#428e99' : theme === 'hall' ? '#172033' : '#334c59');
-      keyPaints.forEach(mat => mat.color.set(theme === 'hall' ? '#2a1f47' : theme === 'beach' ? '#339eae' : theme === 'forest' ? '#46755b' : '#346b7c'));
-      sun.intensity = theme === 'hall' ? 1.3 : theme === 'forest' ? 2.1 : 3.3;
-      sun.color.set(theme === 'hall' ? '#e4edff' : '#fff0d2');
+      (apron.material as THREE.MeshStandardMaterial).color.set(theme === 'forest' ? '#647b59' : theme === 'beach' ? '#535b85' : theme === 'hall' ? '#172033' : '#334c59');
+      keyPaints.forEach(mat => mat.color.set(theme === 'hall' ? '#2a1f47' : theme === 'beach' ? '#6b669c' : theme === 'forest' ? '#46755b' : '#346b7c'));
+      sun.intensity = theme === 'hall' ? 1.3 : theme === 'forest' ? 1.65 : theme === 'beach' ? 1.5 : 3.0;
+      sun.color.set(theme === 'hall' ? '#e4edff' : theme === 'beach' ? '#ffbb99' : theme === 'forest' ? '#e0e8b6' : '#ffe5bf');
+      sun.position.set(...(theme === 'beach' ? [24, 8, -8] : [-10, 24, 7]) as [number, number, number]);
+      ambient.color.set(theme === 'beach' ? '#acabe9' : theme === 'forest' ? '#a4cbb5' : '#dceeff');
+      ambient.groundColor.set(theme === 'beach' ? '#6a4a6f' : theme === 'forest' ? '#374c30' : '#6b5545');
+      ambient.intensity = theme === 'beach' ? 1.45 : theme === 'forest' ? 1.65 : theme === 'hall' ? 1.45 : 2.1;
+      fill.color.set(theme === 'beach' ? '#999be4' : theme === 'forest' ? '#79b3ac' : '#b7d9ff');
+      fill.intensity = theme === 'beach' ? 1.1 : 0.65;
       athletes.forEach((player, index) => {
         animalLooks.get(index)?.setVisible(theme === 'forest');
         player.rig?.traverse(object => {
@@ -524,7 +526,7 @@ export default function Basketball3D() {
           entries.forEach(entry => {
             if (!(entry instanceof THREE.MeshStandardMaterial)) return;
             if (entry.name === 'Skin') entry.color.set(theme === 'forest' ? ['#ae794f', '#d88943', '#c9c9ba'][index % 3] : ['#c59070', '#935f46', '#b77952', '#bd8c68', '#80563f', '#cb9b7e'][index]);
-            if (entry.name === 'Purple' || entry.name === 'LightBlue') entry.color.set(theme === 'hall' && player.team === 1 ? entry.name === 'Purple' ? '#6945a4' : '#edbd4d' : player.team === 0 ? jerseyRef.current : '#3789ef');
+            if (entry.name === 'Purple' || entry.name === 'LightBlue') entry.color.set(theme === 'hall' && player.team === 1 ? entry.name === 'Purple' ? '#6945a4' : '#edbd4d' : player.team === 0 ? jerseyRef.current : theme === 'beach' ? '#7c8bc7' : theme === 'forest' ? '#508e82' : '#3789ef');
           });
         });
       });
@@ -3388,10 +3390,11 @@ export default function Basketball3D() {
       window.removeEventListener('resize', resize);
       athletes.forEach(player => { player.mixer?.stopAllAction(); if (player.rig) player.mixer?.uncacheRoot(player.rig); });
       viewMixer?.stopAllAction();
+      courtWorlds.dispose();
       woodTexture.dispose(); fabricTexture.dispose(); rubberTexture.dispose();
       renderer.dispose();
       scene.traverse((object) => {
-        if (object instanceof THREE.Mesh || object instanceof THREE.Line) {
+        if (object instanceof THREE.Mesh || object instanceof THREE.Line || object instanceof THREE.Points) {
           object.geometry.dispose();
           const materials = Array.isArray(object.material) ? object.material : [object.material];
           materials.forEach((material) => {

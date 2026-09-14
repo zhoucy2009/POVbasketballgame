@@ -156,6 +156,31 @@ export function addAthleteDetails(group: THREE.Group, skeleton: THREE.Skeleton, 
       }
     }
   }
+  // A contrasting forehead band, stitched sock cuffs and padded knee sleeves
+  // give athletes a readable silhouette at first-person viewing distance.
+  const head = skeleton.getBoneByName('Head');
+  if (head) {
+    const p = group.worldToLocal(head.getWorldPosition(new THREE.Vector3()));
+    const band = new THREE.Mesh(new THREE.CylinderGeometry(0.108, 0.11, 0.032, 24, 1, true), ivory);
+    band.name = 'athlete-headband'; band.position.copy(p).add(new THREE.Vector3(0, 0.14, 0.012));
+    band.scale.z = 0.96; attach(band, head);
+  }
+  for (const side of ['L', 'R']) {
+    const foot = skeleton.getBoneByName(`Foot${side}`);
+    if (foot) {
+      const p = group.worldToLocal(foot.getWorldPosition(new THREE.Vector3()));
+      for (let stripe = 0; stripe < 2; stripe++) {
+        const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.061, 0.06, 0.015, 16), trim);
+        cuff.position.copy(p).add(new THREE.Vector3(0, 0.11 + stripe * 0.025, 0)); attach(cuff, foot);
+      }
+    }
+    const knee = skeleton.getBoneByName(`LowerLeg${side}`);
+    if (knee && (side === 'L' || number % 2 === 0)) {
+      const pad = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), trim);
+      pad.scale.set(0.085, 0.105, 0.055);
+      pad.position.copy(group.worldToLocal(knee.getWorldPosition(new THREE.Vector3()))).add(new THREE.Vector3(0, -0.035, 0.062)); attach(pad, knee);
+    }
+  }
   const chest = skeleton.getBoneByName('Chest') ?? skeleton.getBoneByName('Spine2') ?? skeleton.getBoneByName('Spine');
   if (chest) {
     const texture = labelTexture(ctx => {
