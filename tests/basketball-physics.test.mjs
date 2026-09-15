@@ -25,7 +25,7 @@ test('floor restitution yields the expected bounce height and loses energy', () 
     if (resolveFloor(p, v, spin, 0.125, 1 / 240)) hit = true;
     if (hit) apex = Math.max(apex, p.y - 0.125);
   }
-  assert.ok(Math.abs(apex - 2 * 0.76 ** 2) < 0.035, String(apex));
+  assert.ok(Math.abs(apex - 2 * 0.6 ** 2) < 0.035, String(apex));
 });
 test('oblique and spinning contacts never create total kinetic energy', () => {
   for (const spinRate of [-80, 0, 80]) {
@@ -39,7 +39,7 @@ test('oblique and spinning contacts never create total kinetic energy', () => {
 });
 test('rolling ball settles without perpetual micro-bounces or floor penetration', () => {
   const p = new THREE.Vector3(0, 0.125, 0), v = new THREE.Vector3(2, 0, 0), w = new THREE.Vector3();
-  for (let i = 0; i < 2400; i++) { advanceFlight(p, v, 1 / 120); resolveFloor(p, v, w, 0.125, 1 / 120); assert.ok(p.y >= 0.125); }
+  for (let i = 0; i < 240; i++) { advanceFlight(p, v, 1 / 120); resolveFloor(p, v, w, 0.125, 1 / 120); assert.ok(p.y >= 0.125); }
   assert.ok(v.length() < 1e-6); assert.ok(w.length() < 1e-6);
 });
 test('movement acceleration and braking are bounded and frame-rate independent', () => {

@@ -45,11 +45,12 @@ export function contactImpulse(velocity: THREE.Vector3, spin: THREE.Vector3, nor
 export function resolveFloor(position: THREE.Vector3, velocity: THREE.Vector3, spin: THREE.Vector3, radius: number, dt: number) {
   if (position.y > radius) return false;
   position.y = radius;
-  contactImpulse(velocity, spin, new THREE.Vector3(0, 1, 0), radius, Math.abs(velocity.y) < 0.65 ? 0 : 0.76, 0.38);
+  contactImpulse(velocity, spin, new THREE.Vector3(0, 1, 0), radius, Math.abs(velocity.y) < 0.65 ? 0 : 0.6, 0.6);
   if (Math.abs(velocity.y) < 0.16) velocity.y = 0;
   if (velocity.y === 0) {
     const speed = Math.hypot(velocity.x, velocity.z);
-    const factor = speed > 0 ? Math.max(0, speed - 0.34 * dt) / speed : 0;
+    // Rolling resistance dissipates energy even when the contact point no longer slips.
+    const factor = speed > 0 ? Math.max(0, speed - 1.8 * dt) / speed : 0;
     velocity.x *= factor; velocity.z *= factor;
     spin.set(velocity.z / radius, spin.y * Math.exp(-2 * dt), -velocity.x / radius);
   }
